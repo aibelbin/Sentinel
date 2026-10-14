@@ -1,0 +1,35 @@
+# Development overrides, applied automatically by `docker compose up`.
+#
+# Exposes the API directly and adds simulated managed devices. Not used on the
+# VPS, where only the base file and a production override are deployed.
+
+services:
+  api:
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Live-reload the agent source so a collector change is picked up by the
+      # next installer download without rebuilding the image.
+      - ./agent:/app/agent:ro
+
+  sim-device-1:
+    build:
+      context: .
+      dockerfile: sim/Dockerfile
+    hostname: sim-web-01
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./agent:/opt/sentinel-src:ro
+
+  sim-device-2:
+    build:
+      context: .
+      dockerfile: sim/Dockerfile
+    hostname: sim-db-01
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./agent:/opt/sentinel-src:ro

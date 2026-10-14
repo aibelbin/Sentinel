@@ -247,7 +247,7 @@ Resolution is per-device row if present, else the global row. Returned in every 
 
 ### 6.5 Retention
 
-A `prune` subcommand of `server/cli.py`, run daily at 03:00 UTC by a cron entry baked into the API image (which therefore installs `cron` and runs it alongside uvicorn via a small entrypoint script), deletes `package_change` rows, `inventory_report` rows and `task` rows older than **30 days**, and expired `admin_session` rows. `device_package` is current state and is never pruned. This matches §14's 30-day operational retention.
+A `prune` subcommand of `app/cli.py`, run daily at 03:00 UTC by a cron entry baked into the API image (which therefore installs `cron` and starts it from the entrypoint alongside uvicorn), deletes `package_change` rows, `inventory_report` rows and `task` rows older than **30 days**, and expired `admin_session` rows. `device_package` is current state and is never pruned. This matches §14's 30-day operational retention.
 
 ---
 
@@ -338,7 +338,7 @@ sentinel/
   server/
     app/{main,config,db,auth,api/,models/,schemas/,services/}.py
     alembic/
-    cli.py                         # seed-admin, reset-admin-password, prune
+    app/cli.py                     # seed, reset-admin-password, prune
     tests/{unit,integration}/
     Dockerfile
   dashboard/
@@ -356,7 +356,7 @@ sentinel/
   docs/superpowers/specs/
 ```
 
-`server/` and `dashboard/` share one built image with different commands; `agent/` is never installed into a server container.
+`server/` and `dashboard/` build **separate images**. The original plan to share one image contradicted the stronger guarantee in section 8 — that the dashboard has no database driver installed — so they were split: the API image carries `psycopg`, the dashboard image carries only `streamlit` and `requests`. `agent/` is copied into the API image (the installer it serves embeds the agent source) but never executed there.
 
 ### 9.2 Compose
 
@@ -419,3 +419,5 @@ Items `project_schema.md` §17 left open that this spec now fixes, with values c
 | Password hashing | Argon2id |
 | API key format | `sk_dev_` + 32 random bytes base64url, SHA-256 hashed at rest |
 | Retention | 30 days for changes, reports, tasks and sessions |
+| Root filesystem reporting | `/` is always reported whatever filesystem backs it; the allowlist applies only to other mountpoints |
+| Installer bundle caching | Cached on a fingerprint of the agent source's newest mtime and total size, so edits invalidate it without a restart |

@@ -1,0 +1,72 @@
+.PHONY: help up down restart build logs ps test test-server test-agent sim-enroll sim-collect sim-beat sim-list prune psql shell-api shell-dash clean
+
+COMPOSE := docker compose
+
+help:
+	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+
+up: ## Start the stack (builds if needed)
+	$(COMPOSE) up -d --build
+	@echo
+	@echo "  dashboard  http://localhost:$${DASHBOARD_PORT:-8501}"
+	@echo "  api docs   http://localhost:$${API_PORT:-8000}/docs"
+	@echo
+
+down: ## Stop the stack, keeping the database volume
+	$(COMPOSE) down
+
+restart: ## Restart every service
+	$(COMPOSE) restart
+
+build: ## Rebuild images
+	$(COMPOSE) build
+
+logs: ## Follow logs
+	$(COMPOSE) logs -f
+
+ps: ## Show service status
+	$(COMPOSE) ps
+
+test: test-server test-agent ## Run every test suite
+
+test-server: ## Run server tests against a scratch database
+	$(COMPOSE) exec -T api sh -lc 'pip install -q -r requirements-dev.txt && python -m pytest tests -q'
+
+test-agent: ## Run agent tests
+	$(COMPOSE) exec -T api sh -lc 'pip install -q pytest && cd /app/agent && PYTHONPATH=/app/agent python -m pytest tests -q'
+
+sim-enroll: ## Create devices for the sim containers and install the agent in them
+	python3 scripts/enroll_sim.py
+
+sim-collect: ## Force inventory collection on the sim devices now
+	@for c in sim-device-1 sim-device-2; do \
+		echo "--- $$c ---"; \
+		$(COMPOSE) exec -T $$c runuser -u sentinel -- sentinel-agent collect || true; \
+	done
+
+sim-beat: ## Run one beat on the sim devices now
+	@for c in sim-device-1 sim-device-2; do \
+		echo "--- $$c ---"; \
+		$(COMPOSE) exec -T $$c runuser -u sentinel -- sentinel-agent -v beat || true; \
+	done
+
+sim-list: ## Show what the sim devices report locally
+	@for c in sim-device-1 sim-device-2; do \
+		echo "--- $$c ---"; \
+		$(COMPOSE) exec -T $$c runuser -u sentinel -- sentinel-agent status 2>/dev/null || echo "not enrolled"; \
+	done
+
+prune: ## Apply the retention policy now
+	$(COMPOSE) exec -T api python -m app.cli prune
+
+psql: ## Open a database shell
+	$(COMPOSE) exec db psql -U $${POSTGRES_USER:-sentinel} -d $${POSTGRES_DB:-sentinel}
+
+shell-api: ## Shell in the API container
+	$(COMPOSE) exec api bash
+
+shell-dash: ## Shell in the dashboard container
+	$(COMPOSE) exec dashboard bash
+
+clean: ## Stop the stack and DELETE the database volume
+	$(COMPOSE) down -v
