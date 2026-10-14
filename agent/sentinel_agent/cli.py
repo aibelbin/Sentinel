@@ -259,20 +259,33 @@ def cmd_beat(_args: argparse.Namespace) -> int:
             # right timestamp rather than skipped entirely.
             log.warning("heartbeat failed: %s", exc)
             if _inventory_due(agent_config):
-                collect_and_submit(cfg, agent_config, reason="scheduled, offline")
+                try:
+                    collect_and_submit(cfg, agent_config, reason="scheduled, offline")
+                except (HttpError, InsecureUrlRefused) as exc2:
+                    log.error("inventory rejected: %s", exc2)
             return EXIT_OK
 
         state.set(LAST_CONTACT_KEY, _now_iso())
         agent_config = _store_config(response.get("config"))
 
+        # Flush BEFORE collecting. A fresh report carries a newer collected_at,
+        # and the server discards any spooled report older than one already
+        # applied -- so collecting first would silently destroy the offline
+        # history the spool exists to preserve.
+        spool.flush(cfg)
+
         if _inventory_due(agent_config):
-            collect_and_submit(cfg, agent_config, reason="scheduled")
+            # A permanent rejection here must not abort the beat: the queued
+            # tasks below still deserve to run and report back.
+            try:
+                collect_and_submit(cfg, agent_config, reason="scheduled")
+            except (HttpError, InsecureUrlRefused) as exc:
+                log.error("inventory rejected: %s", exc)
 
         queued = response.get("tasks") or []
         if queued:
             _run_tasks(cfg, agent_config, queued)
 
-        spool.flush(cfg)
         return EXIT_OK
 
 

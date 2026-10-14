@@ -35,9 +35,22 @@ def current_admin(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Sliding expiry: every authenticated call extends the window.
+    # Sliding idle expiry, bounded by an absolute ceiling from issue time.
+    settings = get_settings()
+    hard_deadline = session.created_at + timedelta(hours=settings.session_absolute_hours)
+    if hard_deadline.tzinfo is None:
+        hard_deadline = hard_deadline.replace(tzinfo=timezone.utc)
+    if hard_deadline <= now:
+        db.delete(session)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "session_expired"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     session.last_used_at = now
-    session.expires_at = now + timedelta(hours=get_settings().session_ttl_hours)
+    session.expires_at = min(now + timedelta(hours=settings.session_ttl_hours), hard_deadline)
 
     admin = db.get(AdminUser, session.admin_user_id)
     if admin is None:

@@ -2,7 +2,6 @@
 
 import logging
 import os
-import time
 
 from sentinel_agent import paths, state
 
@@ -176,6 +175,3 @@ def sample() -> dict:
         "disks": disks(),
     }
 
-
-def monotonic_now() -> float:
-    return time.time()

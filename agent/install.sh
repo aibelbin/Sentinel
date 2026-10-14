@@ -37,6 +37,7 @@ SYMLINK="/usr/local/bin/sentinel-agent"
 FROM_SOURCE=""
 FORCE_REENROLL=0
 DO_UNINSTALL=0
+SKIP_ENROLL=0
 
 # Tracks whether this run created the install, so a failed enrollment can clean
 # up after itself rather than leaving a half-configured device.
@@ -182,25 +183,47 @@ install_files() {
     info "Installing agent to $INSTALL_DIR"
     [ -d "$INSTALL_DIR" ] || CREATED_INSTALL=1
 
-    rm -rf "$INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR"
+    # Staged into a sibling directory and swapped in only once it is known
+    # good. Unpacking over the live install would, on any failure, leave a cron
+    # entry and a symlink pointing at a missing binary -- a device that stops
+    # reporting with no obvious cause.
+    local staging="${INSTALL_DIR}.new"
+    rm -rf "$staging"
+    mkdir -p "$staging"
 
     if [ -n "$FROM_SOURCE" ]; then
-        [ -d "$FROM_SOURCE/sentinel_agent" ] \
-            || die "--from-source $FROM_SOURCE does not contain sentinel_agent/"
-        cp -R "$FROM_SOURCE/sentinel_agent" "$FROM_SOURCE/bin" "$INSTALL_DIR/"
+        if [ ! -d "$FROM_SOURCE/sentinel_agent" ] || [ ! -d "$FROM_SOURCE/bin" ]; then
+            rm -rf "$staging"
+            die "--from-source $FROM_SOURCE must contain sentinel_agent/ and bin/"
+        fi
+        cp -R "$FROM_SOURCE/sentinel_agent" "$FROM_SOURCE/bin" "$staging/"
     else
-        [ -n "$AGENT_BUNDLE_B64" ] || die "this installer has no embedded agent bundle"
-        printf '%s' "$AGENT_BUNDLE_B64" | base64 -d | tar -xz -C "$INSTALL_DIR" \
-            || die "could not unpack the embedded agent bundle"
+        if [ -z "$AGENT_BUNDLE_B64" ]; then
+            rm -rf "$staging"
+            die "this installer has no embedded agent bundle; pass --from-source DIR"
+        fi
+        if ! printf '%s' "$AGENT_BUNDLE_B64" | base64 -d | tar -xz -C "$staging"; then
+            rm -rf "$staging"
+            die "could not unpack the embedded agent bundle"
+        fi
     fi
 
-    [ -f "$INSTALL_DIR/bin/sentinel-agent" ] || die "agent entrypoint missing after unpack"
+    if [ ! -f "$staging/bin/sentinel-agent" ]; then
+        rm -rf "$staging"
+        die "agent entrypoint missing after unpack; nothing was changed"
+    fi
 
-    find "$INSTALL_DIR" -type d -exec chmod 755 {} +
-    find "$INSTALL_DIR" -type f -exec chmod 644 {} +
-    chmod 755 "$INSTALL_DIR/bin/sentinel-agent"
-    chown -R root:root "$INSTALL_DIR"
+    find "$staging" -type d -exec chmod 755 {} +
+    find "$staging" -type f -exec chmod 644 {} +
+    chmod 755 "$staging/bin/sentinel-agent"
+    chown -R root:root "$staging"
+
+    # Swap: the old tree only goes away once the new one is in place.
+    rm -rf "${INSTALL_DIR}.old"
+    [ -d "$INSTALL_DIR" ] && mv "$INSTALL_DIR" "${INSTALL_DIR}.old"
+    mv "$staging" "$INSTALL_DIR"
+    rm -rf "${INSTALL_DIR}.old"
+
     ln -sfn "$INSTALL_DIR/bin/sentinel-agent" "$SYMLINK"
     ok "installed $(find "$INSTALL_DIR" -type f | wc -l | tr -d ' ') file(s)"
 
@@ -231,9 +254,12 @@ run_as_agent() {
 }
 
 enroll() {
-    if already_enrolled && [ "$FORCE_REENROLL" -eq 0 ]; then
-        ok "already enrolled; keeping the existing device identity"
+    if [ "$SKIP_ENROLL" -eq 1 ]; then
+        ok "kept the existing device identity"
         ok "pass --force-reenroll to register against a different key"
+        # Ownership is re-applied anyway: a reinstall recreates files as root.
+        chown -R "$AGENT_USER:$AGENT_USER" "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+        chmod 600 "$CONFIG_DIR/config.json"
         return
     fi
 
@@ -306,6 +332,7 @@ remove_everything() {
 
 uninstall() {
     info "Removing the Sentinel agent"
+    rm -rf "${INSTALL_DIR}.new" "${INSTALL_DIR}.old"
     remove_everything
     # Logs are deliberately kept: they are the record of what the agent did.
     ok "removed agent, config, state and cron entry"
@@ -327,7 +354,15 @@ main() {
     fi
 
     preflight
-    prompt_credentials
+    # The key is stored only as a hash, so it cannot be looked up again. An
+    # already-enrolled device being reinstalled or upgraded must not be forced
+    # into a needless key rotation just to satisfy a prompt.
+    if already_enrolled && [ "$FORCE_REENROLL" -eq 0 ]; then
+        info "Already enrolled; reinstalling the agent and keeping its identity"
+        SKIP_ENROLL=1
+    else
+        prompt_credentials
+    fi
     create_user
     install_files
     enroll

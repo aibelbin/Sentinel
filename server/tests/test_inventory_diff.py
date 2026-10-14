@@ -9,7 +9,10 @@ from app.models import ChangeType, Device, DevicePackage, PackageChange
 from app.schemas import InventoryRequest
 from app.services.inventory import apply_inventory, normalize_name
 
-T0 = datetime(2026, 10, 14, 6, 0, 0, tzinfo=timezone.utc)
+# Deliberately in the past: the server clamps a collected_at ahead of its own
+# clock, so fixtures dated "today plus N hours" would be silently rewritten and
+# the assertions below would depend on wall-clock timing.
+T0 = datetime(2026, 9, 1, 6, 0, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture

@@ -130,6 +130,13 @@ def _render_packages(api: Api, device: dict) -> None:
     )
     query = search_column.text_input("Search packages", placeholder="e.g. openssl")
 
+    # Reset paging when the view changes: holding offset=300 across a new
+    # search renders an empty table under a "showing 301-5" caption.
+    view_key = (device["id"], ecosystem, query)
+    if st.session_state.get("pkg_view_key") != view_key:
+        st.session_state["pkg_view_key"] = view_key
+        st.session_state["pkg_page"] = 0
+
     page = st.session_state.get("pkg_page", 0)
     try:
         result = api.get(

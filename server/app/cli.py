@@ -86,7 +86,9 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
     device_package is current state and is never pruned.
     """
-    days = args.days or get_settings().retention_days
+    # `or` would turn an explicit --days 0 ("prune everything up to now") into
+    # the 30-day default and report success for a prune that did not happen.
+    days = args.days if args.days is not None else get_settings().retention_days
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     now = datetime.now(timezone.utc)
 

@@ -5,6 +5,7 @@ it runs entirely inside one transaction so a device's current state and its
 change log can never disagree.
 """
 
+import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -23,6 +24,8 @@ from app.models import (
     PackageChange,
 )
 from app.schemas import HostFacts, InventoryRequest
+
+log = logging.getLogger(__name__)
 
 _PYTHON_SEPARATORS = re.compile(r"[-_.]+")
 
@@ -120,6 +123,20 @@ def apply_inventory(db: Session, device: Device, req: InventoryRequest) -> Inven
     """Store a report and reconcile it against the device's current state."""
     collected_at = _as_utc(req.collected_at)
     now = datetime.now(timezone.utc)
+
+    # A device clock set forward would otherwise become a permanent high-water
+    # mark: every later, correctly-stamped report would compare as older and be
+    # discarded as superseded, freezing that device's inventory for good with no
+    # in-app way to recover. Clamping keeps data flowing; the dashboard shows
+    # collected_at beside received_at, so the skew stays visible.
+    if collected_at > now:
+        log.warning(
+            "device %s reported collected_at %s ahead of server time %s; clamping",
+            device.id,
+            collected_at.isoformat(),
+            now.isoformat(),
+        )
+        collected_at = now
 
     newest_applied = db.execute(
         select(func.max(InventoryReport.collected_at)).where(

@@ -55,7 +55,9 @@ def _raise_for_status(response: requests.Response) -> None:
             message = f"{'.'.join(str(p) for p in first.get('loc', []))}: {first.get('msg', '')}"
         elif isinstance(detail, str):
             message = detail
-    except ValueError:
+    except (ValueError, AttributeError):
+        # A proxy or non-FastAPI error page can return a JSON array or scalar,
+        # where .get would raise. The message falls back to the raw body.
         pass
 
     if response.status_code == 401:

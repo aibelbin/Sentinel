@@ -174,6 +174,7 @@ class DevicePackage(Base):
     same package at different versions under two interpreters."""
 
     __tablename__ = "device_package"
+    __table_args__ = (Index("ix_device_package_package", "package_id"),)
 
     device_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("device.id", ondelete="CASCADE"), primary_key=True
@@ -215,6 +216,8 @@ class PackageChange(Base):
     __tablename__ = "package_change"
     __table_args__ = (
         Index("ix_package_change_device_detected", "device_id", "detected_at"),
+        Index("ix_package_change_report", "report_id"),
+        Index("ix_package_change_package", "package_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)

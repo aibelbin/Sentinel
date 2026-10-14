@@ -181,6 +181,7 @@ def upgrade() -> None:
             "meta", postgresql.JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")
         ),
     )
+    op.create_index("ix_device_package_package", "device_package", ["package_id"])
 
     op.create_table(
         "package_change",
@@ -209,6 +210,12 @@ def upgrade() -> None:
     op.create_index(
         "ix_package_change_device_detected", "package_change", ["device_id", "detected_at"]
     )
+    # ON DELETE CASCADE without an index on the referencing column makes
+    # Postgres sequentially scan the child table once per deleted parent row.
+    # The nightly prune deletes from inventory_report, so without this the
+    # prune cost grows with the size of the whole change log.
+    op.create_index("ix_package_change_report", "package_change", ["report_id"])
+    op.create_index("ix_package_change_package", "package_change", ["package_id"])
 
     op.create_table(
         "task",
@@ -261,6 +268,12 @@ def upgrade() -> None:
     # visits the settings page.
     op.execute(
         "INSERT INTO agent_config (id, device_id) VALUES (1, NULL) ON CONFLICT DO NOTHING"
+    )
+    # An explicit-id INSERT does not advance the serial sequence, so the first
+    # per-device override would be handed id 1 and collide with the global row.
+    op.execute(
+        "SELECT setval(pg_get_serial_sequence('agent_config', 'id'), "
+        "GREATEST((SELECT MAX(id) FROM agent_config), 1))"
     )
 
 

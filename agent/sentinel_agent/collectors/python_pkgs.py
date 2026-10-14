@@ -83,11 +83,15 @@ def collect() -> list[dict]:
     for interpreter in interpreters:
         try:
             stdout = run([interpreter, "-m", "pip", "list", "--format=json"], timeout=60)
+            # parse() must be inside the try: it raises CollectorSkipped on
+            # unparseable output, and letting that escape would throw away the
+            # packages already collected from earlier interpreters.
+            found = parse(stdout, scope=interpreter)
         except CollectorSkipped as exc:
-            # pip missing for one interpreter is normal; keep going with the rest.
+            # pip missing or broken for one interpreter is normal; keep going.
             log.info("skipping %s: %s", interpreter, exc)
             continue
-        packages.extend(parse(stdout, scope=interpreter))
+        packages.extend(found)
         reported.append(interpreter)
 
     if not reported:

@@ -18,7 +18,12 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "change-me-now"
 
+    # Idle timeout: a session expires this long after its last use.
     session_ttl_hours: int = 12
+    # Absolute ceiling, measured from issue time. Without it, sliding expiry
+    # means a token used at least once every session_ttl_hours never expires,
+    # so a stolen token stays valid indefinitely.
+    session_absolute_hours: int = 24
     retention_days: int = 30
     abandoned_task_minutes: int = 30
 

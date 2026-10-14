@@ -25,10 +25,6 @@ from app.services.inventory import apply_host_facts, apply_inventory
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Task types the platform will ever hand to an agent. The agent validates this
-# again on its side; both ends refusing unknown types is deliberate.
-ALLOWED_TASK_TYPES = {"collect_inventory"}
-
 
 @router.post("/enroll", response_model=EnrollResponse)
 def enroll(

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 T = TypeVar("T")
 
@@ -156,8 +156,25 @@ class TaskResultRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+def _require_non_blank(value: str | None) -> str | None:
+    """Strip before length validation.
+
+    Without this, min_length=1 passes for "   " and the route's own .strip()
+    then stores an empty name, which renders as a blank row and makes the
+    delete confirmation unsatisfiable.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("must not be blank")
+    return stripped
+
+
 class DeviceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
+
+    _strip_name = field_validator("name")(_require_non_blank)
 
 
 class DeviceKeyIssued(BaseModel):
@@ -171,6 +188,8 @@ class DeviceKeyIssued(BaseModel):
 class DevicePatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     enabled: bool | None = None
+
+    _strip_name = field_validator("name")(_require_non_blank)
 
 
 class ResourcesOut(BaseModel):

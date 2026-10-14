@@ -64,6 +64,7 @@ def flush(config: Config, limit: int = 20) -> int:
     discards the row instead, since retrying it forever would block the queue.
     """
     delivered = 0
+    discarded = 0
     with state.connect() as conn:
         rows = conn.execute(
             "SELECT id, path, body FROM spool ORDER BY created_ms, id LIMIT ?", (limit,)
@@ -80,16 +81,23 @@ def flush(config: Config, limit: int = 20) -> int:
                 log.info("spool flush paused: %s", exc)
                 break
             log.error("discarding spooled %s, server refused it permanently: %s", path, exc)
+            discarded += 1
         except json.JSONDecodeError:
             log.error("discarding unparseable spooled row %d", row_id)
+            discarded += 1
+        else:
+            delivered += 1
 
         with state.connect() as conn:
             conn.execute("DELETE FROM spool WHERE id = ?", (row_id,))
-        delivered += 1
 
-    if delivered:
-        log.info("flushed %d spooled report(s)", delivered)
-    return delivered
+    if delivered or discarded:
+        log.info(
+            "spool: %d report(s) delivered, %d discarded as permanently rejected",
+            delivered,
+            discarded,
+        )
+    return delivered + discarded
 
 
 def send_or_spool(config: Config, path: str, payload: dict, max_bytes: int) -> dict | None:
