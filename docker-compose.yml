@@ -51,7 +51,10 @@ services:
       # What a managed device should be pointed at. Override this for the VPS.
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
     ports:
-      - "${DASHBOARD_PORT:-8501}:8501"
+      # Bound to loopback, not 0.0.0.0. The dashboard is reached through a
+      # reverse proxy or a Tailscale funnel, so publishing it on every
+      # interface would expose it directly with no TLS in front.
+      - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"
 
 volumes:
   db_data:
