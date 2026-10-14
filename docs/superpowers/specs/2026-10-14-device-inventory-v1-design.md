@@ -17,7 +17,7 @@
 - Admin authentication (single administrator, password only).
 - Device registration producing a per-device API key.
 - A terminal installer script that enrolls a device and installs a cron entry.
-- A cron-driven bash agent that reports resources, collects software inventory, executes queued tasks, and spools reports while offline.
+- A cron-driven agent that reports resources, collects software inventory, executes queued tasks, and spools reports while offline.
 - Backend-delivered agent configuration.
 - A Devices list and a device detail page.
 
@@ -43,10 +43,9 @@ Deferred entirely, each to its own spec cycle: software intelligence collection,
 | Enrollment | Admin pre-creates the device; one-time key shown once | Matches `project_schema.md` §4.1. Every key is individually revocable and a leaked key compromises exactly one device. |
 | Test target | Simulated Ubuntu containers in Compose | Matches §15. The cron runtime model (below) means these need only `cron`, not `/sbin/init` as PID 1 — so no privileged containers and no cgroup configuration. |
 | Agent runtime | Single script invoked by cron; no daemon, no systemd unit | Explicit user requirement: a cron-jobable, manually triggerable background script. Also strictly more robust than a daemon — a failed run has no consequences because the next minute is a fresh process. |
-| Agent implementation | Bash, using only `curl`, `awk`, `flock` and `dpkg-query` | All are present on a default Ubuntu Server install, so enrollment installs nothing and needs no access to apt or PyPI. Nothing is resident between cron runs, so there is no polling process to consume memory. |
-| Agent wire protocol | Line-oriented text, not JSON | Follows from the bash decision: parsing a JSON response in shell would require `jq`, which Ubuntu does **not** ship by default, and generating a 1500-package JSON body in shell means hand-rolled escaping of values like `cpu_model`, which routinely contains quotes and parentheses. Tab-separated records avoid escaping entirely. Admin routes remain JSON. |
+| Agent dependencies | Python standard library only | The installer then requires only `python3`, which every Ubuntu Server install carries because cloud-init and unattended-upgrades depend on it. No venv creation, no `pip install` on the client, no PyPI reachability during enrollment, no wheel to build. Bash was considered and rejected: parsing the heartbeat response in shell needs `jq`, which Ubuntu does *not* ship, so bash would have meant an `apt install` at enrollment — a worse dependency story than the interpreter that is already present. |
 | Dashboard data path | Streamlit calls FastAPI; never touches PostgreSQL | Keeps §2's promise that the frontend is replaceable. Swapping in React later means writing a client against an API that already exists and is already exercised. |
-| Distributions | Ubuntu 20.04+ only | One package-manager path and one guaranteed base toolchain. Debian is excluded because its minimal installs cannot be relied on to carry `curl`; the collector layout keeps `dnf` or Debian support a new module later rather than a rewrite. |
+| Distributions | Ubuntu 20.04+ only | One package-manager path, and `python3` is guaranteed present rather than merely likely as on minimal Debian. The collector interface keeps Debian or `dnf` support a new module later rather than a rewrite. |
 | Background workers | None | v1 has no server-side scheduled processing. Device status is derived at read time from `last_seen_at`. Retention pruning is a CLI command on a cron schedule inside the API container. No Celery, no Redis. |
 
 ---
@@ -80,7 +79,7 @@ One cron entry drives everything:
 
 ```cron
 # /etc/cron.d/sentinel-agent
-* * * * * sentinel /opt/sentinel-agent/sentinel-agent beat --quiet
+* * * * * sentinel /opt/sentinel-agent/bin/sentinel-agent beat --quiet
 ```
 
 Several cron entries — one per minute for heartbeat, one twice daily for inventory — were rejected because a schedule living in `/etc/cron.d` on each device cannot be changed from the dashboard, which contradicts the backend-delivered configuration requirement. Cron therefore controls only the tick; the script decides what is due.
@@ -112,17 +111,14 @@ Cron's one-minute floor matches the 60-second heartbeat default in §16 exactly.
 
 | Path | Mode | Owner | Contents |
 |---|---|---|---|
-| `/opt/sentinel-agent/sentinel-agent` | 755 | root | CLI entrypoint, `#!/usr/bin/env bash` |
-| `/opt/sentinel-agent/lib/*.sh` | 644 | root | sourced modules: `config`, `http`, `state`, `spool`, `resources`, `tasks`, `log`, `collect_*` |
+| `/opt/sentinel-agent/` | 755 | root | script and modules |
+| `/opt/sentinel-agent/bin/sentinel-agent` | 755 | root | CLI entrypoint |
 | `/usr/local/bin/sentinel-agent` | symlink | root | convenience symlink so the manual commands in §4.2 work from any shell |
-| `/etc/sentinel-agent/config.env` | 600 | sentinel | shell-sourceable: `SERVER_URL`, `DEVICE_ID`, `API_KEY`, `INSECURE` |
-| `/var/lib/sentinel-agent/state/` | 700 | sentinel | one small file per value — `last_collect_at`, `cpu_sample`, `cached_config.env`, `last_contact_at` |
-| `/var/lib/sentinel-agent/spool/` | 700 | sentinel | one file per undelivered report, named `<epoch_ms>-<kind>.txt` |
+| `/etc/sentinel-agent/config.json` | 600 | sentinel | server URL, device ID, API key |
+| `/var/lib/sentinel-agent/state.db` | 600 | sentinel | SQLite: spool, `last_collect_at`, cached config, previous CPU sample |
 | `/var/lib/sentinel-agent/agent.lock` | 600 | sentinel | flock target |
-| `/var/log/sentinel-agent/agent.log` | 640 | sentinel | appended; rotated by the script itself at 2 MB, keeping 5 generations |
+| `/var/log/sentinel-agent/agent.log` | 640 | sentinel | rotating log, 5 × 2 MB via stdlib `RotatingFileHandler` |
 | `/etc/cron.d/sentinel-agent` | 644 | root | the entry above |
-
-State is flat files rather than a database: bash has no SQLite binding without installing one, and every value the agent persists is a scalar or a small key-value set, so files are both sufficient and directly inspectable during debugging. Each write is atomic — write to a temporary file in the same directory, then `mv` — so a run killed mid-write cannot leave a half-written state file.
 
 The agent runs as a dedicated unprivileged `sentinel` system user with `/usr/sbin/nologin` as its shell. `dpkg-query`, `/proc`, `npm ls -g` and system `pip` are all readable unprivileged, satisfying §13's least-privilege requirement. Only the installer needs root.
 
@@ -130,51 +126,44 @@ The agent runs as a dedicated unprivileged `sentinel` system user with `/usr/sbi
 
 ### 4.4 Collectors
 
-Each collector is a sourced function `collect_<name>` writing tab-separated records — `ecosystem`, `scope`, `name`, `version` — to stdout, one per line. Adding Debian, `dnf` or project-dependency scanning later means a new file in `lib/`, not a change to an existing one.
-
-Every command is chosen so its output needs no JSON parsing:
+Each collector is a module exposing `collect() -> list[dict]` returning `{ecosystem, name, version, meta}`. Adding `dnf` or project-dependency scanning later is a new module, not a change to an existing one.
 
 | Collector | Mechanism | Ecosystem tag |
 |---|---|---|
-| os | `dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}\n'`, keeping rows whose status abbreviation is `ii` | `os` |
-| python | For each `python3*` on `PATH`: `<interp> -m pip list --format=freeze`, which emits `name==version` and needs no parser. `scope` is the interpreter's resolved path | `python` |
-| npm | `npm ls -g --depth=0 --parseable`, giving one install path per line; the package name is the final path segment and the version comes from the matching `package.json` via a single `awk` pass | `npm` |
-| java | Directory names under `/usr/lib/jvm`, plus `java -version` stderr for the default JDK | `java` |
+| os | `dpkg-query -W -f='${Package}\t${Version}\t${Status}\n'`, keeping only rows whose status is `install ok installed` | `os` |
+| python | For each `python3*` on `PATH`: `<interp> -m pip list --format=json`; `meta.interpreter` records which one | `python` |
+| npm | `npm ls -g --depth=0 --json`, reading `.dependencies` | `npm` |
+| java | Directories under `/usr/lib/jvm` plus `java -version` stderr parsing | `java` |
 | host | `/etc/os-release`, `uname -r -m`, `/proc/cpuinfo`, `/proc/meminfo` | n/a — host facts |
-
-`pip list --format=freeze` is used in place of `--format=json` specifically so the agent needs no JSON reader. It omits editable-install paths, which v1 does not report anyway.
 
 Collector rules:
 
-- Every command runs under `timeout 30`, and a missing binary is not an error: the collector emits nothing and the run records `collector=<name>:skipped:not installed`.
-- A failing collector must never abort the report. Whatever succeeded is submitted, and the `collector=` header lines say which collectors failed and why, so the dashboard shows partial inventory honestly rather than silently showing less.
-- Values are passed through `tr -d '\t\n'` before emission. Tabs and newlines are the only characters that could corrupt the wire format, and no real package name, version or CPU model contains either — so this is the complete escaping story, which is the main thing the line protocol buys over JSON.
+- Every subprocess call has a timeout (30 s default) and a missing binary is not an error — the collector returns an empty list and records a note in the report's `collector_status` map.
+- One collector failing must not abort the report. The report is submitted with whatever succeeded, and `collector_status` says which collectors failed and why, so the dashboard can show partial inventory honestly rather than silently showing less.
 
 ### 4.5 Resource sampling
 
-All from `/proc` via `awk`, with no external tools:
+Standard library only:
 
-- **CPU** — `/proc/stat` jiffy deltas against the previous sample in `state/cpu_sample`. The first beat after enrollment reports `cpu_percent=` (empty, meaning unknown) because there is no prior sample; every later beat covers exactly the interval since the last one.
+- **CPU** — `/proc/stat` jiffy deltas against the previous sample stored in `state.db`. The first beat after enrollment reports `cpu_percent: null` because there is no prior sample; every subsequent beat covers exactly the interval since the last one.
 - **Memory** — `/proc/meminfo`: `MemTotal`, `MemAvailable`.
-- **Disk** — `df -P -B1` filtered against `/proc/mounts` to real block-backed filesystems (`ext4`, `xfs`, `btrfs`, `zfs`, `vfat`), excluding `overlay`, `tmpfs`, `devtmpfs`, `squashfs`. `df` is coreutils, so it is always present.
-- **Load** — `/proc/loadavg`.
+- **Disk** — `os.statvfs` per mountpoint from `/proc/mounts`, filtered to real block-backed filesystems (`ext4`, `xfs`, `btrfs`, `zfs`, `vfat`), excluding `overlay`, `tmpfs`, `devtmpfs`, `squashfs`.
+- **Load** — `os.getloadavg()`.
 - **Uptime** — `/proc/uptime`.
 
 ### 4.6 Offline spool
 
-A report that fails to deliver is written to `spool/<epoch_ms>-<kind>.txt` with its original `collected_at` header intact, so the server reconstructs history from the agent's timestamps per §4 of the requirements. A directory of files is a natural queue in shell: `ls` gives ordering because the names are zero-padded epoch milliseconds, and `du -sb` gives the total size.
+Reports that fail to deliver are appended to a `spool` table in `state.db` with their original `collected_at` timestamp, so the server reconstructs history from timestamps, per §4 of the requirements.
 
 - Size cap: **64 MB**, configurable via backend-delivered config.
-- Overflow: oldest-first eviction, logged at WARN.
+- Overflow: oldest-first eviction, logged at WARNING.
 - No age-based expiry in v1; the 30-day policy in §14 is a later tightening.
-- Flush is oldest-first and stops on the first failure, so ordering is preserved and an unreachable server does not cause a long retry storm every minute.
-- A spooled file is removed only after the server returns 2xx, so a crash mid-flush retries rather than loses the report. The server therefore must tolerate a duplicate report, which it does: an identical `collected_at` for the same device is accepted and recorded, and §6.3's superseded rule means it produces no change rows.
+- Flush is oldest-first and stops on the first failure, so ordering is preserved and a down server does not cause a long retry storm each minute.
+- A spooled report is deleted only after the server returns 2xx, so a crash mid-flush retries rather than loses it. Delivery is therefore at-least-once, and the server must tolerate a duplicate — it does: an identical `collected_at` for the same device is accepted and recorded, and §6.3's superseded rule means it produces no change rows.
 
 ### 4.7 Task execution
 
-v1 defines exactly one task type: `collect_inventory`. The agent dispatches via a `case` statement over the task type, which selects a shell function defined in the agent itself; an unrecognized type is reported `failed` with `error=unsupported task type` rather than ignored, so the dashboard shows the truth.
-
-**No value received from the server is ever evaluated as shell.** Task types are matched against literal `case` patterns, never interpolated into a command, and task parameters are read into named variables and validated against the handler's expected keys before use. This is the central security requirement of a shell agent and upholds §4 and §13's prohibition on arbitrary command execution. The agent script runs under `set -euo pipefail` with `IFS` set explicitly, and all variable expansions are quoted.
+v1 defines exactly one task type: `collect_inventory`. The agent executes only task types it has a registered handler for; an unknown type is reported `failed` with `error: "unsupported task type"` rather than ignored, so the dashboard shows the truth. No shell strings are accepted from the server — the task `type` selects a Python function, and `params` are validated against that handler's expected keys. This upholds §4 and §13's prohibition on arbitrary command execution.
 
 ---
 
@@ -182,7 +171,7 @@ v1 defines exactly one task type: `collect_inventory`. The agent dispatches via 
 
 `agent/install.sh`, a POSIX shell script the administrator hands to the operator of the target device. Run as root.
 
-1. **Preflight** — confirm Ubuntu 20.04+ via `/etc/os-release`; confirm `bash` ≥ 4, `curl`, `awk`, `flock`, `df` and `dpkg-query` are present; confirm `cron` is installed and its service active. Any failure aborts naming the missing tool and the `apt install` line that fixes it, before anything is written. `curl` is the only one plausibly absent, and only on a minimized cloud image.
+1. **Preflight** — confirm Ubuntu 20.04+ via `/etc/os-release`; confirm `python3` ≥ 3.8; confirm `cron` is installed and its service active; confirm `dpkg-query` exists. Any failure aborts naming what is missing and the `apt install` line that fixes it, before anything is written.
 2. **Prompt** — ask interactively for the server URL and the API key. The key prompt disables echo. Both are also accepted as `--server` / `--key` flags for scripted installs, alongside `--insecure`, which is passed through to `enroll`.
 3. **Create** the `sentinel` system user and group if absent.
 4. **Install** the agent files to `/opt/sentinel-agent`, and create `/etc/sentinel-agent`, `/var/lib/sentinel-agent` and `/var/log/sentinel-agent` with the ownership and modes in §4.3.
@@ -264,60 +253,11 @@ A `prune` subcommand of `server/cli.py`, run daily at 03:00 UTC by a cron entry 
 
 ## 7. API
 
-FastAPI, all routes under `/api/v1`. **Admin routes use JSON with Pydantic v2 models. Agent routes use the line protocol below**, because the agent is shell and cannot parse JSON without `jq`. The two halves are deliberately different: the agent protocol optimizes for being generated and parsed by `awk`, the admin API optimizes for being consumed by Streamlit today and React later.
-
-### 7.0 Agent line protocol
-
-`Content-Type: text/plain; charset=utf-8` in both directions. A body is a block of `key=value` header lines, then optionally a blank line followed by tab-separated records. Keys may repeat, which is how lists are expressed. Values contain no tabs or newlines (§4.4), so parsing needs no escaping rules.
-
-An inventory report body:
-
-```text
-collected_at=2026-10-14T06:00:03Z
-agent_version=1.0.0
-collector=os:ok
-collector=python:ok
-collector=npm:skipped:not installed
-collector=java:ok
-
-os	system	nginx	1.24.0-2ubuntu7
-python	/usr/bin/python3.11	numpy	2.1.0
-java	system	openjdk-17-jdk	17.0.12
-```
-
-A heartbeat body:
-
-```text
-agent_version=1.0.0
-cpu_percent=12.4
-memory_total_bytes=8203431936
-memory_available_bytes=4120094720
-load_1=0.15
-load_5=0.22
-load_15=0.18
-uptime_seconds=98234
-spool_depth=0
-disk=/:ext4:50000000000:20311234560
-disk=/boot:ext4:1000000000:600000000
-```
-
-A heartbeat response:
-
-```text
-config.poll_interval_seconds=60
-config.inventory_interval_seconds=43200
-config.spool_max_bytes=67108864
-task=9f3c1e80-...:collect_inventory
-task.9f3c1e80-....param.force=true
-```
-
-The `task.<id>.param.<key>=<value>` shape is used from the start so that future task types with parameters need no protocol change. An empty value means unknown — `cpu_percent=` on the first beat after enrollment.
-
-Server-side, each agent route has a hand-written parser module with its own unit tests, since Pydantic is not doing this validation. Parsers reject unknown keys, enforce a maximum body size and a maximum record count, and return `400` with a `code` and the offending line number. The agent's own requests are the fixtures those parsers are tested against.
+FastAPI, all routes under `/api/v1`, Pydantic v2 request and response models. OpenAPI is the agent's contract document.
 
 ### 7.1 Agent routes
 
-Authenticated by `Authorization: Bearer sk_dev_...`. A revoked key or a disabled device returns `403` with a machine-readable `code=` line, so the agent can log a clear reason rather than retrying blindly. Every agent response includes the resolved `config.*` lines so a device that missed a heartbeat still converges.
+Authenticated by `Authorization: Bearer sk_dev_...`. A revoked key or a disabled device returns `403` with a machine-readable `code`, so the agent can log a clear reason rather than retrying blindly. Every agent response includes the resolved `config` so a device that missed a heartbeat still converges.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -407,13 +347,12 @@ sentinel/
     api_client.py
     tests/
   agent/
-    sentinel-agent                 # bash entrypoint
-    lib/{config,http,state,spool,resources,tasks,log}.sh
-    lib/collect_{os,python,npm,java,host}.sh
+    sentinel_agent/{cli,config,http,state,spool,resources,tasks,collectors/}.py
+    bin/sentinel-agent
     install.sh
-    tests/                         # bats suites + captured command fixtures
+    tests/
   sim/
-    Dockerfile                     # Ubuntu 22.04 + cron + curl + python3-pip + nodejs
+    Dockerfile                     # Ubuntu 22.04 + cron + python3
   docs/superpowers/specs/
 ```
 
@@ -423,7 +362,7 @@ sentinel/
 
 `db` (PostgreSQL 16, named volume, health check), `api` (migrations on start, then uvicorn), `dashboard`, and in the override file `sim-device-1..3` built from `sim/Dockerfile`. Each sim device runs `cron -f` in the foreground as PID 1 — no init system, no privileged flag, no cgroup mounts, which is the practical payoff of the cron runtime model.
 
-The sim image installs `python3-pip` and `nodejs` so the Python and npm collectors have something real to inventory. That is a property of the *test fixture*, not a dependency of the agent — the agent itself needs neither.
+The sim image also installs `python3-pip` and `nodejs` so the Python and npm collectors have something real to inventory. That is a property of the test fixture, not of the agent — the agent needs neither `pip` nor `npm` present to run.
 
 Environment-specific values live in `.env`: database credentials, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `PUBLIC_API_URL`, `LOG_LEVEL`. `.env.example` documents every variable. Secrets are never committed.
 
@@ -439,11 +378,11 @@ Local development uses plain HTTP over the Compose network. The VPS deployment a
 
 Per §15, automated tests from the start.
 
-**Unit (server, pytest)** — the line-protocol parsers against captured real agent bodies, plus malformed input: unknown keys, a record with the wrong field count, an oversized body, a missing required header. The diff engine against hand-built before/after sets, including the out-of-order and superseded cases and two interpreters holding the same package at different versions. Name normalization per ecosystem; status derivation at each threshold boundary; key generation, hashing and revocation; config resolution with and without a per-device override.
+**Unit (server)** — the diff engine against hand-built before/after sets, including the out-of-order and superseded cases and two interpreters holding the same package at different versions; name normalization per ecosystem; status derivation at each threshold boundary; key generation, hashing and revocation; config resolution with and without a per-device override.
 
-**Unit (agent, bats)** — every collector against captured real command output, with the fixture binaries injected by putting a stub directory first on `PATH`. Degenerate cases: missing binary, empty output, a package name containing a space, `timeout` firing. Resource parsers against captured `/proc` files, including the first-beat empty `cpu_percent`. Spool ordering and eviction at the size cap. Lock contention — a second `beat` while the first holds the lock must exit 0 without acting. `shellcheck` runs over every shell file in CI and is treated as a test failure, since it catches the unquoted-expansion class of bug that bash makes easy and silent.
+**Unit (agent)** — every collector parser against captured real command output held as fixtures, injected by putting a stub binary directory first on `PATH` so the collector runs its real code path against known output. Degenerate cases: missing binary, empty output, malformed JSON, a package name containing a space, timeout. Resource parsers against captured `/proc` files, including the first-beat `cpu_percent: null` case. Spool ordering and eviction at the size cap. Lock contention — a second `beat` while the first holds the lock must exit 0 without acting.
 
-**Integration** — the real agent script against the real API and a real PostgreSQL, asserting the full sequence: enroll, beat, collect, the diff producing the expected change rows, and a report submitted while the API is unreachable spooling and then flushing on the next beat. Because the agent and server share no types, **these tests are the only thing pinning the wire contract** — so they assert on exact bodies, not just on status codes.
+**Integration** — the real agent script against the real API and a real PostgreSQL, asserting the full sequence: enroll, beat, collect, diff produces the expected change rows, and a report delivered while the API is unreachable spools and then flushes on the next beat. These tests are what pin the agent/API contract, since the agent has no shared types with the server.
 
 **End-to-end** — `docker compose up`, then `install.sh` runs inside a sim container and the device appears in `GET /devices` as `online` with a non-zero package count within two minutes. A second E2E case installs a package inside the sim container, queues `collect_inventory`, and asserts the change log shows the addition.
 
@@ -456,12 +395,11 @@ Verification is evidence-based: a test run's output, not an assertion that it sh
 Recorded so the parent document can be reconciled later.
 
 1. **No systemd service (§4).** The agent is a cron-invoked script, per explicit user direction. Consequences: §4's restart-on-failure behaviour is inherent rather than configured, and logs go to a rotating file rather than journald. A systemd timer remains a drop-in alternative later for machines wanting catch-up after downtime via `Persistent=true`.
-2. **The agent is bash, not Python (§2, §4).** Per explicit user direction, for the lightest possible footprint on managed devices. Consequences: agent routes use a line protocol rather than JSON, so those routes lose Pydantic validation in favour of hand-written parsers; agent tests are `bats` plus `shellcheck` rather than pytest; and adding the richer client-side logic the later roadmap implies — project-dependency scanning with exclusion rules, version-range comparison — will be materially harder in shell than it would have been in Python. The point at which that becomes the binding constraint is the point to reconsider.
-3. **Ubuntu only, not Linux generally (§2).** Debian is excluded in v1 because minimal Debian installs cannot be relied on to carry `curl`, which the bash agent requires. The collector layout keeps other distributions additive.
-4. **No full inventory snapshots (§14).** Current state plus a change log, for the storage reasons in §6.3. The intent of §14 — reconstructing changes over time — is satisfied.
-5. **Spool has no 30-day age policy (§4).** Size cap only in v1; the age policy is a later tightening.
-6. **Resource history is not stored (§3, §14).** Latest value only.
-7. **Only the Devices tab exists (§8).** The other eleven tabs are later specs.
+2. **Ubuntu only, not Linux generally (§2).** v1 targets Ubuntu 20.04+; Debian is excluded because its minimal installs cannot be relied on to carry `python3`. The collector interface keeps other distributions additive.
+3. **No full inventory snapshots (§14).** Current state plus a change log, for the storage reasons in §6.3. The intent of §14 — reconstructing changes over time — is satisfied.
+4. **Spool has no 30-day age policy (§4).** Size cap only in v1; the age policy is a later tightening.
+5. **Resource history is not stored (§3, §14).** Latest value only.
+6. **Only the Devices tab exists (§8).** The other eleven tabs are later specs.
 
 ---
 
