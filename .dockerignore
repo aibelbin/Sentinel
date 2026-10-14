@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+docs
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.venv
+venv
+*.egg-info
+.DS_Store

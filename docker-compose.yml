@@ -1,0 +1,60 @@
+name: sentinel
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel}
+      POSTGRES_DB: ${POSTGRES_DB:-sentinel}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD:-sentinel}@db:5432/${POSTGRES_DB:-sentinel}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me-now}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AGENT_SOURCE_DIR: /app/agent
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=5).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 6
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      # Inside the Compose network.
+      API_URL: http://api:8000
+      # What a managed device should be pointed at. Override this for the VPS.
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      # Bound to loopback, not 0.0.0.0. The dashboard is reached through a
+      # reverse proxy or a Tailscale funnel, so publishing it on every
+      # interface would expose it directly with no TLS in front.
+      - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"
+
+volumes:
+  db_data:

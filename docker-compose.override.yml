@@ -1,0 +1,47 @@
+# Development overrides, applied automatically by `docker compose up`.
+#
+# Exposes the API directly and adds simulated managed devices. Not used on the
+# VPS, where only the base file and a production override are deployed.
+
+services:
+  api:
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"
+    # --reload in development only; the base file runs uvicorn plain.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      # Live-reload the agent source so a collector change is picked up by the
+      # next installer download without rebuilding the image.
+      - ./agent:/app/agent:ro
+      # Server code and tests are mounted too, so editing either does not need
+      # an image rebuild. Without this, a test edit is silently not picked up
+      # and you end up debugging the previous build.
+      - ./server/app:/app/app
+      - ./server/tests:/app/tests
+      - ./server/alembic:/app/alembic
+
+  dashboard:
+    volumes:
+      - ./dashboard:/app
+
+  sim-device-1:
+    build:
+      context: .
+      dockerfile: sim/Dockerfile
+    hostname: sim-web-01
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./agent:/opt/sentinel-src:ro
+
+  sim-device-2:
+    build:
+      context: .
+      dockerfile: sim/Dockerfile
+    hostname: sim-db-01
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./agent:/opt/sentinel-src:ro
