@@ -161,6 +161,11 @@ rsync -az --delete --exclude .git --exclude .env ./ fox:~/sentinel/
 ssh fox 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build'
 ```
 
+`--build` is not optional for agent changes. Production does not mount
+`./agent` — only the development override does — so the agent source the
+installer embeds is baked into the API image. Syncing the files alone updates
+nothing that gets served.
+
 **The funnel is open to the internet.** Anyone who knows the URL reaches the
 login page, and admin auth is a password with no 2FA and no rate limiting —
 that is v1's stated scope, not an oversight, but it is the thing to tighten

@@ -124,16 +124,17 @@ preflight() {
     if ! command -v crontab >/dev/null 2>&1 && [ ! -d /etc/cron.d ]; then
         die "cron not found. Install it with: apt-get install -y cron"
     fi
-    if command -v systemctl >/dev/null 2>&1; then
-        if ! systemctl is-active --quiet cron 2>/dev/null; then
-            warn "the cron service is not active; the agent will not run until it is"
-            warn "start it with: systemctl enable --now cron"
-        else
-            ok "cron is active"
-        fi
+    # Checked in order of reliability. systemctl is authoritative on a normal
+    # host, but the binary exists on images where systemd is not PID 1, where
+    # it always reports failure -- so a running cron process is accepted as
+    # proof regardless, rather than warning that a working install is broken.
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet cron 2>/dev/null; then
+        ok "cron is active"
+    elif pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; then
+        ok "cron is running"
     else
-        # No systemd, e.g. inside a container running cron directly.
-        if pgrep -x cron >/dev/null 2>&1; then ok "cron is running"; else warn "cron does not appear to be running"; fi
+        warn "cron does not appear to be running; the agent will not run until it is"
+        warn "start it with: systemctl enable --now cron"
     fi
 
     command -v base64 >/dev/null 2>&1 || die "base64 not found (coreutils)"
