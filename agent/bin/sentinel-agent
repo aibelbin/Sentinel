@@ -1,17 +1,134 @@
 #!/usr/bin/env python3
-"""Entrypoint shim.
+"""Stable entrypoint. Updates never replace this file.
 
-Adds the install root to sys.path so the agent package imports without being
-pip-installed. This is what lets the installer work with nothing but python3
-present on the device.
+Everything else under /opt/sentinel-agent is replaceable; this is not. It
+exists for one reason: if a new version somehow installs but then cannot run,
+there has to be working code left to notice and put the previous version back.
+Without it a bad release means a machine that goes quiet with nothing running
+to repair it.
+
+It therefore does as little as possible, and imports nothing from the agent
+until after the fallback check has run.
 """
 
+import json
 import os
 import sys
+import time
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+INSTALL_ROOT = Path(os.environ.get("SENTINEL_INSTALL_ROOT", "/opt/sentinel-agent"))
+STATE_DIR = Path(os.environ.get("SENTINEL_STATE_DIR", "/var/lib/sentinel-agent"))
 
-from sentinel_agent.cli import main  # noqa: E402
+LIVE = INSTALL_ROOT / "live"
+CURRENT = LIVE / "current"
+VERSIONS = LIVE / "versions"
+PENDING = STATE_DIR / "pending_version.json"
+
+# How long a freshly installed version gets to complete one beat before we
+# conclude it never will. Three cron ticks, so a single slow run is not
+# mistaken for a broken release.
+GRACE_SECONDS = 180
+
+
+def _note(message: str) -> None:
+    sys.stderr.write(f"sentinel-launcher: {message}\n")
+
+
+def _read_pending() -> dict | None:
+    try:
+        marker = json.loads(PENDING.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return marker if isinstance(marker, dict) and marker.get("fallback") else None
+
+
+def _point_current_at(version: str) -> bool:
+    """Repoint `current` atomically. Returns True if it moved."""
+    target = VERSIONS / version
+    if not target.is_dir():
+        _note(f"cannot fall back to {version}: {target} is missing")
+        return False
+
+    staging = LIVE / ".current.swap"
+    try:
+        if staging.is_symlink() or staging.exists():
+            staging.unlink()
+        staging.symlink_to(target)
+        # rename() over an existing symlink is atomic, so there is no instant
+        # where `current` does not resolve.
+        os.replace(staging, CURRENT)
+    except OSError as exc:
+        _note(f"could not repoint current to {version}: {exc}")
+        return False
+    return True
+
+
+def _revert(marker: dict, reason: str) -> bool:
+    fallback = marker["fallback"]
+    if not _point_current_at(fallback):
+        return False
+    try:
+        PENDING.unlink()
+    except OSError:
+        pass
+    _note(f"version {marker.get('version')} {reason}; reverted to {fallback}")
+    return True
+
+
+def _revert_if_overdue() -> None:
+    """Fall back when an installed version has had its chance and never ran."""
+    marker = _read_pending()
+    if marker is None:
+        return
+    swapped_at = marker.get("swapped_at") or 0
+    if time.time() - swapped_at < GRACE_SECONDS:
+        return
+    _revert(marker, f"did not complete a beat within {GRACE_SECONDS}s")
+
+
+def _current_root() -> Path:
+    if CURRENT.is_symlink() or CURRENT.is_dir():
+        try:
+            return CURRENT.resolve(strict=True)
+        except OSError:
+            pass
+    # Not a versioned install: running straight from a source checkout.
+    return Path(__file__).resolve().parents[1]
+
+
+
+def _load(root: Path):
+    sys.path.insert(0, str(root))
+    from sentinel_agent.cli import main
+
+    return main
+
+
+def main() -> int:
+    _revert_if_overdue()
+
+    root = _current_root()
+    try:
+        agent_main = _load(root)
+    except Exception as exc:  # noqa: BLE001 - the whole point is to survive this
+        # The installed version will not even import. Waiting out the grace
+        # period would leave the machine silent for three minutes, so fall back
+        # immediately if there is somewhere to fall back to.
+        _note(f"{root} failed to load: {type(exc).__name__}: {exc}")
+        marker = _read_pending()
+        if marker is None or not _revert(marker, "failed to load"):
+            raise
+        # The failed import leaves sentinel_agent in sys.modules with __path__
+        # pointing at the bad version, so a plain retry re-imports the same
+        # broken file. Drop it before loading the fallback.
+        sys.path.pop(0)
+        for name in [key for key in sys.modules if key.split(".")[0] == "sentinel_agent"]:
+            del sys.modules[name]
+        agent_main = _load(_current_root())
+
+    return agent_main()
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

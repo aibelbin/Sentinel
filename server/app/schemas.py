@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 T = TypeVar("T")
 
-AGENT_VERSION_MAX = 32
+AGENT_VERSION_MAX = 64
 MAX_PACKAGES_PER_REPORT = 20000
 
 
@@ -95,6 +95,21 @@ class ResourceSample(BaseModel):
     disks: list[Disk] = Field(default_factory=list, max_length=64)
 
 
+class UpdateReport(BaseModel):
+    """How the machine's last agent update went.
+
+    A revert is only observable from here: the server handed out a version, the
+    machine tried it and went back, and nothing else would tell it so.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["ok", "installed", "reverted", "failed"] | None = None
+    detail: str | None = Field(default=None, max_length=500)
+    at: datetime | None = None
+    version: str | None = Field(default=None, max_length=64)
+
+
 class HeartbeatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -102,6 +117,7 @@ class HeartbeatRequest(BaseModel):
     spool_depth: int = Field(default=0, ge=0)
     resources: ResourceSample = Field(default_factory=ResourceSample)
     host: HostFacts | None = None
+    update: UpdateReport | None = None
 
 
 class TaskOut(BaseModel):
@@ -204,6 +220,24 @@ class ResourcesOut(BaseModel):
     disks: list[Disk]
 
 
+class AgentBundle(BaseModel):
+    """The agent code an updating machine downloads."""
+
+    version: str
+    sha256: str
+    bundle_b64: str
+
+
+class ReleaseOut(BaseModel):
+    version: str
+    sha256: str
+    first_seen_at: datetime
+    quarantined: bool
+    failure_reason: str | None
+    devices_on_version: int
+    devices_total: int
+
+
 class DeviceSummary(BaseModel):
     id: UUID
     name: str
@@ -217,6 +251,7 @@ class DeviceSummary(BaseModel):
     os_version: str | None
     package_count: int
     resources: ResourcesOut | None
+    update_status: str
 
 
 class DeviceDetail(DeviceSummary):
@@ -228,6 +263,11 @@ class DeviceDetail(DeviceSummary):
     config: AgentConfigOut
     last_report_at: datetime | None
     last_collector_status: dict[str, str]
+    previous_agent_version: str | None
+    last_update_at: datetime | None
+    last_update_result: str | None
+    last_update_detail: str | None
+    target_agent_version: str | None
 
 
 class PackageOut(BaseModel):

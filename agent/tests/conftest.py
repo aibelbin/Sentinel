@@ -26,7 +26,7 @@ def sandbox(tmp_path, monkeypatch):
     from sentinel_agent import paths
 
     importlib.reload(paths)
-    for name in ("config", "state", "spool", "resources"):
+    for name in ("config", "state", "spool", "resources", "version", "updater"):
         module = importlib.import_module(f"sentinel_agent.{name}")
         importlib.reload(module)
 

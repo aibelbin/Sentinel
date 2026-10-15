@@ -1,14 +1,19 @@
 """Operational commands. Run inside the API container.
 
     python -m app.cli seed
+    python -m app.cli create-device --name web-01 [--rotate] [--stdout]
+    python -m app.cli list-devices
     python -m app.cli reset-admin-password [--password X]
     python -m app.cli prune [--days N]
 """
 
 import argparse
 import getpass
+import os
+import stat
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import delete, func, select
 
@@ -19,11 +24,16 @@ from app.models import (
     AdminSession,
     AdminUser,
     AgentConfig,
+    Device,
+    DeviceKey,
     InventoryReport,
     PackageChange,
     Task,
 )
-from app.security import hash_password
+from app.security import hash_password, new_device_key
+from app.services import agent_config, agent_release
+from app.services.installer import build_installer
+from app.status import derive_status
 
 
 def cmd_seed(_args: argparse.Namespace) -> int:
@@ -51,6 +61,151 @@ def cmd_seed(_args: argparse.Namespace) -> int:
             print("created global agent config")
 
         db.commit()
+    return 0
+
+
+def _issue_key(db, device: Device) -> str:
+    """Issue a key, revoking any live one. Returns the plaintext, once."""
+    now = datetime.now(timezone.utc)
+    live = db.execute(
+        select(DeviceKey).where(DeviceKey.device_id == device.id, DeviceKey.revoked_at.is_(None))
+    ).scalars().all()
+    for row in live:
+        row.revoked_at = now
+    db.flush()
+
+    plaintext, key_hash = new_device_key()
+    db.add(DeviceKey(device_id=device.id, key_hash=key_hash, created_at=now))
+    return plaintext
+
+
+def cmd_create_device(args: argparse.Namespace) -> int:
+    """Register a device and emit its installer.
+
+    The same thing the dashboard's "Add device" does, for when you are already
+    on the server. The key is shown once here and nowhere else: only its hash
+    is stored.
+    """
+    settings = get_settings()
+    server_url = (args.server_url or settings.public_api_url or "").rstrip("/")
+    if not server_url:
+        print(
+            "no server URL: pass --server-url, or set PUBLIC_API_URL for this service",
+            file=sys.stderr,
+        )
+        return 1
+    if not server_url.startswith(("http://", "https://")):
+        print(f"server URL must start with http:// or https:// (got {server_url!r})",
+              file=sys.stderr)
+        return 1
+
+    insecure = bool(args.insecure)
+    if server_url.startswith("http://") and not insecure:
+        print(
+            f"refusing to bake a plain-HTTP URL ({server_url}) into an installer; "
+            "pass --insecure for local testing",
+            file=sys.stderr,
+        )
+        return 1
+
+    name = args.name.strip()
+    if not name:
+        print("a device name is required", file=sys.stderr)
+        return 1
+
+    with SessionLocal() as db:
+        device = db.execute(select(Device).where(Device.name == name)).scalar_one_or_none()
+
+        if device is not None and not args.rotate:
+            print(
+                f"device {name!r} already exists. Its key cannot be recovered, only "
+                "replaced -- pass --rotate to issue a new one, which stops the old "
+                "key working.",
+                file=sys.stderr,
+            )
+            return 1
+
+        created = device is None
+        if created:
+            device = Device(name=name)
+            db.add(device)
+            db.flush()
+
+        api_key = _issue_key(db, device)
+        version, _sha256 = agent_release.current_release()
+        agent_release.record(db)
+
+        try:
+            script = build_installer(
+                settings.agent_source_dir,
+                version=version,
+                server_url=server_url,
+                api_key=api_key,
+                insecure=insecure,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            db.rollback()
+            print(f"could not build the installer: {exc}", file=sys.stderr)
+            return 1
+
+        db.commit()
+        device_id = str(device.id)
+
+    if args.stdout:
+        # Script on stdout so it can be redirected or piped from the host;
+        # everything a human needs goes to stderr so it stays out of the file.
+        sys.stdout.write(script)
+        print(
+            f"{'created' if created else 'rotated key for'} {name}\n"
+            f"  device id : {device_id}\n"
+            f"  api key   : {api_key}\n"
+            f"  version   : {version}",
+            file=sys.stderr,
+        )
+        return 0
+
+    out = Path(args.out) if args.out else Path.cwd() / f"sentinel-install-{name}.sh"
+    out.write_text(script, encoding="utf-8")
+    # The script contains the key, so it must not be world-readable.
+    os.chmod(out, stat.S_IRUSR | stat.S_IWUSR)
+
+    print(f"{'created' if created else 'rotated key for'} {name}")
+    print(f"  device id : {device_id}")
+    print(f"  api key   : {api_key}")
+    print(f"  version   : {version}")
+    print(f"  installer : {out} (mode 600)")
+    print()
+    print("  Copy it to the machine and run:  sudo bash " + out.name)
+    if not created:
+        print("  The previous key no longer works; re-run with --force-reenroll there.")
+    return 0
+
+
+def cmd_list_devices(_args: argparse.Namespace) -> int:
+    """What the fleet looks like, without needing the dashboard."""
+    with SessionLocal() as db:
+        devices = db.execute(select(Device).order_by(Device.name)).scalars().all()
+        if not devices:
+            print("no devices registered")
+            return 0
+
+        release = agent_release.record(db)
+        db.commit()
+
+        configs = agent_config.resolve_many(db, [d.id for d in devices])
+        print(f"{'NAME':<20} {'STATUS':<9} {'AGENT':<14} {'UPDATE':<15} LAST SEEN")
+        for device in devices:
+            status = derive_status(
+                enabled=device.enabled,
+                last_seen_at=device.last_seen_at,
+                poll_interval_seconds=configs[device.id].poll_interval_seconds,
+            )
+            seen = device.last_seen_at.strftime("%Y-%m-%d %H:%M:%SZ") if device.last_seen_at else "never"
+            print(
+                f"{device.name:<20} {status:<9} {str(device.agent_version or '-'):<14} "
+                f"{agent_release.update_status(device, release):<15} {seen}"
+            )
+        print(f"\nserver is serving version {release.version}")
     return 0
 
 
@@ -121,6 +276,31 @@ def main(argv: list[str] | None = None) -> int:
     reset = sub.add_parser("reset-admin-password", help="set a new admin password")
     reset.add_argument("--password", help="read from a prompt when omitted")
     reset.set_defaults(func=cmd_reset_admin_password)
+
+    create = sub.add_parser("create-device", help="register a device and write its installer")
+    create.add_argument("--name", required=True, help="a label you choose, e.g. web-01")
+    create.add_argument(
+        "--server-url", help="address the device reports to (default: PUBLIC_API_URL)"
+    )
+    create.add_argument(
+        "--insecure", action="store_true", help="allow a plain-HTTP server URL (testing only)"
+    )
+    create.add_argument(
+        "--rotate",
+        action="store_true",
+        help="if the device already exists, issue a new key and revoke the old one",
+    )
+    create.add_argument("--out", help="where to write the installer")
+    create.add_argument(
+        "--stdout",
+        action="store_true",
+        help="write the script to stdout instead of a file, so it can be piped",
+    )
+    create.set_defaults(func=cmd_create_device)
+
+    sub.add_parser("list-devices", help="show the fleet and its agent versions").set_defaults(
+        func=cmd_list_devices
+    )
 
     prune = sub.add_parser("prune", help="delete history past the retention window")
     prune.add_argument("--days", type=int, default=None)

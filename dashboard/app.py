@@ -21,7 +21,10 @@ PAGES = {
 
 
 def _clear_session() -> None:
-    for key in ("token", "username", "page", "device_id", "new_device", "rotated_key", "pkg_page"):
+    for key in (
+        "token", "username", "page", "device_id", "new_device", "rotated_key",
+        "pkg_page", "pkg_view_key", "pending_delete",
+    ):
         st.session_state.pop(key, None)
 
 

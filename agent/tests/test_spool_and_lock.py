@@ -196,7 +196,9 @@ def test_collect_inventory_runs_the_local_handler():
 
 
 def test_only_expected_task_types_are_registered():
-    assert tasks.registered_types() == ["collect_inventory"]
+    """A short, closed list. Anything else arriving from the server is
+    reported failed rather than guessed at."""
+    assert tasks.registered_types() == ["collect_inventory", "update_agent"]
 
 
 # --------------------------------------------------------------------------- #

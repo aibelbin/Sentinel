@@ -5,8 +5,50 @@ import streamlit as st
 from api_client import Api, ApiError
 
 
+def _render_agent_version(api: Api) -> None:
+    st.subheader("Agent version")
+    try:
+        release = api.get("/agent-release")
+    except ApiError as exc:
+        st.warning(f"Could not read the agent version: {exc.message}")
+        return
+
+    columns = st.columns(3)
+    columns[0].metric("Current version", release["version"][:8])
+    columns[1].metric(
+        "Machines updated", f"{release['devices_on_version']}/{release['devices_total']}"
+    )
+    columns[2].metric("Status", "Held back" if release["quarantined"] else "Rolling out")
+
+    st.caption(
+        "The version is a hash of the agent code on this server, so deploying "
+        "changes it automatically. Machines pick it up on their next heartbeat."
+    )
+
+    if release["quarantined"]:
+        st.error(
+            f"**This version is held back.** A machine reported it failed, so it is "
+            f"not being sent to anyone else.\n\nReason: {release['failure_reason']}"
+        )
+        st.markdown(
+            "Deploying a new version clears this on its own. Use the button "
+            "below only if you believe the failure was a one-off rather than a "
+            "problem with the build."
+        )
+        if st.button("Try this version again"):
+            try:
+                api.post("/agent-release/clear-quarantine")
+                st.success("Cleared. Machines will retry on their next heartbeat.")
+                st.rerun()
+            except ApiError as exc:
+                st.error(exc.message)
+
+    st.divider()
+
+
 def render(api: Api) -> None:
     st.header("Settings")
+    _render_agent_version(api)
     st.caption(
         "These are the global defaults delivered to agents on their next "
         "heartbeat. Nothing is pushed to devices; they converge within a minute."

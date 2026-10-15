@@ -12,16 +12,28 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sentinel_agent import __version__, collectors, config, paths, resources, spool, state, tasks
+from sentinel_agent import (
+    __version__,
+    collectors,
+    config,
+    paths,
+    resources,
+    spool,
+    state,
+    tasks,
+    updater,
+)
 from sentinel_agent.collectors import host
 from sentinel_agent.http import HttpError, InsecureUrlRefused, TransportError, post
 from sentinel_agent.log import setup
+from sentinel_agent.version import installed_version, running_version
 
 log = logging.getLogger("sentinel.cli")
 
 LAST_COLLECT_KEY = "last_collect_at"
 CACHED_CONFIG_KEY = "cached_config"
 LAST_CONTACT_KEY = "last_contact_at"
+LAST_UPDATE_KEY = "last_update"
 
 DEFAULT_CONFIG = {
     "poll_interval_seconds": 60,
@@ -85,6 +97,59 @@ def _store_config(payload: dict | None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Update reporting
+# --------------------------------------------------------------------------- #
+
+
+def _record_update_result(result: str, detail: str, version: str | None = None) -> None:
+    """Remember how the last update went, to report on the next heartbeat.
+
+    `version` is the version the result is *about*, which for a revert is the
+    one that failed rather than the fallback now running.
+    """
+    state.set(
+        LAST_UPDATE_KEY,
+        {"result": result, "detail": detail[:500], "at": _now_iso(),
+         "version": version or running_version()},
+    )
+
+
+def _last_update_report() -> dict | None:
+    """What the server is told about this machine's last update.
+
+    A revert is only visible from here: the server handed out a version, the
+    machine tried it and went back, and nothing else would tell it so.
+    """
+    record = state.get(LAST_UPDATE_KEY)
+    if not isinstance(record, dict):
+        return None
+    return {
+        "result": str(record.get("result", ""))[:32],
+        "detail": str(record.get("detail", ""))[:500],
+        "at": record.get("at"),
+        "version": str(record.get("version", ""))[:64],
+    }
+
+
+def _note_launcher_revert() -> None:
+    """Detect that the stable launcher rolled this machine back.
+
+    The launcher cannot report anything itself — it has no credentials and no
+    HTTP code — so the first beat after a revert is where that gets noticed.
+    """
+    pending = state.get("seen_pending_version")
+    installed = installed_version()
+    if pending and installed and pending != installed:
+        log.warning("version %s was reverted; now running %s", pending, installed)
+        _record_update_result(
+            "reverted",
+            f"{pending} failed to run; fell back to {installed}",
+            version=pending,
+        )
+        state.set("seen_pending_version", None)
+
+
+# --------------------------------------------------------------------------- #
 # Inventory
 # --------------------------------------------------------------------------- #
 
@@ -96,7 +161,7 @@ def collect_and_submit(cfg: config.Config, agent_config: dict, reason: str) -> d
 
     payload = {
         "collected_at": _now_iso(),
-        "agent_version": __version__,
+        "agent_version": running_version(),
         "collector_status": status,
         "packages": packages,
         "host": host.facts(),
@@ -151,9 +216,48 @@ def _inventory_due(agent_config: dict) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+class UpdateAttemptFailed(Exception):
+    """Carries whether the failure says anything about the build itself.
+
+    Only a build failure should make the server withhold a version from the
+    rest of the fleet. A timeout on one machine's network says nothing about
+    the release, and quarantining on it would take a healthy version away from
+    everyone.
+    """
+
+    def __init__(self, message: str, kind: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def _install_update(cfg: config.Config, *, version: str, sha256: str) -> dict:
+    """Install a new agent version, recording the outcome either way."""
+    try:
+        outcome = updater.install(cfg, version, sha256)
+    except updater.UpdateFailed as exc:
+        # The bundle was wrong, corrupt, or could not run: evidence about the
+        # build, so the server should stop handing it out.
+        _record_update_result("failed", str(exc), version=version)
+        raise UpdateAttemptFailed(str(exc), "build") from exc
+    except (TransportError, HttpError) as exc:
+        # Could not fetch it. Transient and local to this machine.
+        _record_update_result("failed", f"could not fetch {version}: {exc}", version=version)
+        raise UpdateAttemptFailed(f"could not fetch the bundle: {exc}", "transient") from exc
+
+    if outcome.get("installed"):
+        # Remembered so that if the launcher has to revert, the next beat can
+        # work out what happened and say so.
+        state.set("seen_pending_version", version)
+        _record_update_result(
+            "installed", f"{outcome['previous_version']} -> {version}", version=version
+        )
+    return outcome
+
+
 def _run_tasks(cfg: config.Config, agent_config: dict, queued: list) -> None:
     context = {
         "collect_now": lambda reason="task": collect_and_submit(cfg, agent_config, reason),
+        "install_update": lambda **kw: _install_update(cfg, **kw),
     }
 
     for task in queued:
@@ -202,7 +306,7 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         insecure=bool(args.insecure),
     )
 
-    payload = {"agent_version": __version__, "host": host.facts()}
+    payload = {"agent_version": running_version(), "host": host.facts()}
     try:
         response = post(cfg, "/api/v1/agent/enroll", payload)
     except InsecureUrlRefused as exc:
@@ -238,12 +342,15 @@ def cmd_beat(_args: argparse.Namespace) -> int:
             log.debug("another run holds the lock, exiting")
             return EXIT_LOCKED
 
+        _note_launcher_revert()
+
         agent_config = _cached_config()
         payload = {
-            "agent_version": __version__,
+            "agent_version": running_version(),
             "spool_depth": spool.depth(),
             "resources": resources.sample(),
             "host": host.facts(),
+            "update": _last_update_report(),
         }
 
         try:
@@ -286,6 +393,13 @@ def cmd_beat(_args: argparse.Namespace) -> int:
         if queued:
             _run_tasks(cfg, agent_config, queued)
 
+        # Reaching here means a full beat succeeded on this version, which is
+        # what takes it off probation. Done last, so a version that breaks any
+        # earlier step is never treated as proven.
+        if updater.confirm_running_version():
+            log.info("version %s completed a beat; it is now the fallback", running_version())
+            _record_update_result("ok", f"confirmed {running_version()}")
+
         return EXIT_OK
 
 
@@ -310,6 +424,58 @@ def cmd_collect(_args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_selftest(_args: argparse.Namespace) -> int:
+    """Prove this build can run, before it is ever swapped in.
+
+    Run out-of-process against a freshly unpacked version by the updater. It
+    deliberately touches no network and writes nothing: it answers only "does
+    this code load and wire together", which is what distinguishes a broken
+    release from a broken server.
+    """
+    checks: list[tuple[str, str]] = []
+    try:
+        from sentinel_agent import resources as _resources
+        from sentinel_agent import spool as _spool  # noqa: F401
+        from sentinel_agent.collectors import host as _host
+        from sentinel_agent.collectors import java_pkgs, npm_pkgs, os_pkgs, python_pkgs
+
+        checks.append(("imports", "ok"))
+
+        for name, parser, sample in (
+            ("os parser", os_pkgs.parse, "ii\tnginx\t1.24.0\n"),
+            ("npm parser", npm_pkgs.parse, '{"dependencies": {}}'),
+        ):
+            parser(sample)
+            checks.append((name, "ok"))
+
+        python_pkgs.parse("[]", scope="selftest")
+        checks.append(("python parser", "ok"))
+        java_pkgs.parse_jvm_dir([])
+        checks.append(("java parser", "ok"))
+
+        if not isinstance(_host.facts(), dict):
+            raise RuntimeError("host facts did not return a mapping")
+        checks.append(("host facts", "ok"))
+
+        if not isinstance(_resources.sample(), dict):
+            raise RuntimeError("resource sample did not return a mapping")
+        checks.append(("resource sample", "ok"))
+
+        if tasks.registered_types() != ["collect_inventory", "update_agent"]:
+            raise RuntimeError(f"unexpected job types: {tasks.registered_types()}")
+        checks.append(("job handlers", "ok"))
+    except Exception as exc:  # noqa: BLE001 - any failure means do not install
+        for name, result in checks:
+            print(f"  {name}: {result}")
+        print(f"  FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    for name, result in checks:
+        print(f"  {name}: {result}")
+    print(f"  version: {running_version()}")
+    return EXIT_OK
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     try:
         cfg = config.load()
@@ -320,7 +486,15 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(
         json.dumps(
             {
-                "agent_version": __version__,
+                "agent_version": running_version(),
+                "release": __version__,
+                "installed_version": installed_version(),
+                "confirmed_version": updater.confirmed_version(),
+                "versions_on_disk": sorted(
+                    entry.name
+                    for entry in paths.VERSIONS_DIR.iterdir()
+                    if entry.is_dir()
+                ) if paths.VERSIONS_DIR.is_dir() else [],
                 "server_url": cfg.base_url,
                 "device_id": cfg.device_id,
                 "insecure": cfg.insecure,
@@ -362,6 +536,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="print enrollment and queue state").set_defaults(
         func=cmd_status
     )
+    sub.add_parser(
+        "selftest", help="check this build can run (used before an update is applied)"
+    ).set_defaults(func=cmd_selftest)
 
     args = parser.parse_args(argv)
     setup(verbose=args.verbose, quiet=args.quiet)

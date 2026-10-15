@@ -1,9 +1,9 @@
-"""Builds the downloadable installer.
+"""Builds the downloadable installer, and the bundle agents update from.
 
 The script is self-contained: the agent source is embedded as a base64 tar.gz
 so the administrator downloads one file, copies it to the device, and runs it.
-Nothing else needs fetching, and the only network call the installer makes is
-enrollment itself.
+The same bundle bytes are served to already-enrolled machines when they update,
+so an installed agent and an updated one are byte-identical.
 """
 
 import base64
@@ -13,7 +13,12 @@ import tarfile
 from functools import lru_cache
 from pathlib import Path
 
-BUNDLE_MEMBERS = ("sentinel_agent", "bin")
+BUNDLE_MEMBERS = ("sentinel_agent",)
+
+# The stable launcher is installed from the installer and deliberately left out
+# of the update bundle: updates must never replace the one piece that can put a
+# broken version back.
+LAUNCHER_MEMBERS = ("bin",)
 
 
 def _deterministic(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -26,53 +31,7 @@ def _deterministic(info: tarfile.TarInfo) -> tarfile.TarInfo:
     return info
 
 
-def _source_fingerprint(root: Path) -> tuple:
-    """Newest mtime and total size across the bundled source.
-
-    Used as a cache key so that editing the agent invalidates the cached
-    bundle on its own. In production the source is baked into the image and
-    never changes, so this costs one stat sweep per request; in development it
-    is what stops a downloaded installer from silently carrying stale code.
-    """
-    newest = 0.0
-    total = 0
-    for name in BUNDLE_MEMBERS:
-        for path in _sorted_paths(root / name):
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            newest = max(newest, stat.st_mtime)
-            total += stat.st_size
-    return (newest, total)
-
-
-@lru_cache(maxsize=4)
-def _bundle_b64_cached(agent_source_dir: str, _fingerprint: tuple) -> str:
-    root = Path(agent_source_dir)
-    missing = [name for name in BUNDLE_MEMBERS if not (root / name).exists()]
-    if missing:
-        raise FileNotFoundError(
-            f"agent source incomplete under {root}: missing {', '.join(missing)}"
-        )
-
-    buf = io.BytesIO()
-    # GzipFile(mtime=0) rather than tarfile's "w:gz", because the latter stamps
-    # the current time into the gzip header and there is no way to override it.
-    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as gz:
-        with tarfile.open(fileobj=gz, mode="w") as tar:
-            for name in BUNDLE_MEMBERS:
-                for path in _sorted_paths(root / name):
-                    tar.add(
-                        path,
-                        arcname=str(path.relative_to(root)),
-                        filter=_deterministic,
-                        recursive=False,
-                    )
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def _sorted_paths(top: Path) -> list[Path]:
+def sorted_paths(top: Path) -> list[Path]:
     """Walk in a stable order. os.scandir order is filesystem-dependent, which
     would otherwise make the bundle bytes differ between machines."""
     paths = [top]
@@ -84,8 +43,70 @@ def _sorted_paths(top: Path) -> list[Path]:
     return paths
 
 
-def _bundle_b64(agent_source_dir: str) -> str:
-    return _bundle_b64_cached(agent_source_dir, _source_fingerprint(Path(agent_source_dir)))
+def source_fingerprint(root: Path) -> tuple:
+    """Newest mtime and total size across the agent source.
+
+    Used as a cache key so that editing the agent invalidates cached bundles on
+    its own. In production the source is baked into the image and never
+    changes, so this costs one stat sweep per request; in development it is
+    what stops a downloaded installer carrying stale code.
+    """
+    newest = 0.0
+    total = 0
+    for name in BUNDLE_MEMBERS + LAUNCHER_MEMBERS:
+        for path in sorted_paths(root / name):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            newest = max(newest, stat.st_mtime)
+            total += stat.st_size
+    return (newest, total)
+
+
+def _pack(root: Path, members: tuple[str, ...]) -> bytes:
+    missing = [name for name in members if not (root / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"agent source incomplete under {root}: missing {', '.join(missing)}"
+        )
+
+    buf = io.BytesIO()
+    # GzipFile(mtime=0) rather than tarfile's "w:gz", because the latter stamps
+    # the current time into the gzip header and there is no way to override it.
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w") as tar:
+            for name in members:
+                for path in sorted_paths(root / name):
+                    tar.add(
+                        path,
+                        arcname=str(path.relative_to(root)),
+                        filter=_deterministic,
+                        recursive=False,
+                    )
+    return buf.getvalue()
+
+
+@lru_cache(maxsize=4)
+def _bundle_cached(agent_source_dir: str, _fingerprint: tuple) -> bytes:
+    return _pack(Path(agent_source_dir), BUNDLE_MEMBERS)
+
+
+@lru_cache(maxsize=4)
+def _launcher_cached(agent_source_dir: str, _fingerprint: tuple) -> bytes:
+    return _pack(Path(agent_source_dir), LAUNCHER_MEMBERS)
+
+
+def bundle_bytes(agent_source_dir: str) -> bytes:
+    """The agent code an updating machine downloads. Excludes the launcher."""
+    root = Path(agent_source_dir)
+    return _bundle_cached(agent_source_dir, source_fingerprint(root))
+
+
+def launcher_bytes(agent_source_dir: str) -> bytes:
+    """The stable launcher, shipped only by the installer."""
+    root = Path(agent_source_dir)
+    return _launcher_cached(agent_source_dir, source_fingerprint(root))
 
 
 def _template(agent_source_dir: str) -> str:
@@ -102,21 +123,24 @@ def _shell_single_quote(value: str) -> str:
 def build_installer(
     agent_source_dir: str,
     *,
+    version: str,
     server_url: str | None = None,
     api_key: str | None = None,
     insecure: bool = False,
 ) -> str:
     """Render install.sh, optionally with credentials pre-filled.
 
-    Omitted values leave the script prompting interactively, which is what the
-    generic download does.
+    Omitted credentials leave the script prompting interactively, which is what
+    the generic download does.
     """
     script = _template(agent_source_dir)
     replacements = {
         "@@SERVER_URL@@": _shell_single_quote(server_url or ""),
         "@@API_KEY@@": _shell_single_quote(api_key or ""),
         "@@INSECURE@@": "1" if insecure else "",
-        "@@BUNDLE@@": _bundle_b64(agent_source_dir),
+        "@@AGENT_VERSION@@": _shell_single_quote(version),
+        "@@BUNDLE@@": base64.b64encode(bundle_bytes(agent_source_dir)).decode("ascii"),
+        "@@LAUNCHER@@": base64.b64encode(launcher_bytes(agent_source_dir)).decode("ascii"),
     }
     for token, value in replacements.items():
         if token not in script:
@@ -128,4 +152,5 @@ def build_installer(
 def clear_caches() -> None:
     """Used by tests. Normal operation needs no manual invalidation, because
     the cache key includes the source fingerprint."""
-    _bundle_b64_cached.cache_clear()
+    _bundle_cached.cache_clear()
+    _launcher_cached.cache_clear()

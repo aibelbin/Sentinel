@@ -45,6 +45,85 @@ and key is also available on the same page.
 `PUBLIC_API_URL` in `.env` is the address baked into downloaded installers, so
 it has to be reachable **from the devices** — not `localhost`, once you deploy.
 
+## Updating agents
+
+Agents update themselves. Edit the agent code, deploy, and machines pick up the
+new version on their next heartbeat — no installer, no SSH, nothing to upload.
+
+```
+edit agent code  →  deploy  →  machines update themselves within a minute
+```
+
+**The version is a hash of the agent source**, so any edit under
+`agent/sentinel_agent/` produces a new version automatically. There is no
+number to bump and no way to forget.
+
+The one exception is `agent/bin/sentinel-agent`, the launcher. It is
+deliberately outside the update bundle — updates must never be able to replace
+the piece that puts a broken version back — so **editing it does not produce a
+new version and will not reach existing machines.** Changing the launcher means
+re-running the installer, which is why it is kept small and boring.
+
+The
+deployed code is the source of truth, which means reverting your checkout and
+redeploying rolls the fleet back too — `git revert` is a working emergency
+brake.
+
+On each machine the code lives in versioned directories with a `current`
+pointer:
+
+```
+/opt/sentinel-agent/
+├── bin/sentinel-agent      stable launcher - updates never replace this
+├── versions/<hash>/        one directory per version
+└── current -> versions/<hash>
+```
+
+**Nothing privileged is involved.** The tree belongs to the agent's own user,
+and swapping the `current` symlink is atomic.
+
+### What stops a bad version taking the fleet down
+
+1. **Checksum.** A truncated or corrupted download is rejected before anything
+   is written.
+2. **Self-test before the swap.** The new code runs its own `selftest` as a
+   separate process. If it cannot even import, nothing is swapped and the
+   running version is untouched.
+3. **Probation.** After a swap, the new version has three minutes to complete
+   one full beat. If it does not, the stable launcher puts the previous version
+   back — this is the only reason that launcher exists.
+4. **Quarantine.** The first machine to report an update failure causes the
+   server to stop offering that version to anyone else, and the dashboard says
+   so. One machine has a bad minute instead of the whole fleet going dark.
+
+The previous version stays on disk until a newer one has proven itself, so
+there is always something known-good to fall back to.
+
+### Seeing where the fleet is
+
+**Settings** shows the current version and how many machines have it. The
+Devices list has an Agent column:
+
+| Shown | Means |
+|---|---|
+| Up to date | running the current version |
+| Update pending | on an older version, not picked up yet — this is what an offline machine looks like |
+| Rolled back | took the version, it failed, reverted itself |
+| Held back | the version is quarantined and is not being offered |
+| Not managed | agent predates self-updating; run the installer once |
+
+A quarantined version clears by itself when you deploy a new one, since
+quarantine applies to one hash. There is also a "try this version again"
+button in Settings for when a failure was a fluke.
+
+### Bootstrapping
+
+An agent installed before self-updating existed cannot update itself to the
+version that adds it — it has no handler for the job. Those machines show
+**Not managed** and need the installer run once; after that they update on
+their own forever. Re-running the installer keeps the device's identity and
+history, so this is not disruptive.
+
 ## How the agent runs
 
 One cron entry, every minute:
@@ -65,9 +144,10 @@ Standard library only, so the installer needs nothing but `python3`.
 Manual use on a device:
 
 ```sh
-sentinel-agent status     # enrollment, last contact, spool depth
+sentinel-agent status     # enrollment, versions on disk, last contact, spool depth
 sentinel-agent collect    # collect and report now
 sentinel-agent beat -v    # one full pass, verbose
+sentinel-agent selftest   # check this build can run (used before an update applies)
 ```
 
 | Path | Contents |
@@ -127,38 +207,26 @@ to terminate TLS in front: the agent refuses to send its key over plain HTTP
 unless enrolled with `--insecure`, which is for local testing and is logged
 loudly on every beat.
 
-### Live deployment: fox
+### Behind a reverse proxy
 
-Running on the `fox` VPS, exposed publicly through a Tailscale funnel.
-
-| | |
-|---|---|
-| Dashboard | `https://fox.tailcc00e1.ts.net:10000/` |
-| API (for devices) | `https://fox.tailcc00e1.ts.net:10000/sentinel-api` |
-| Project | `~/sentinel` |
-| Host ports | `127.0.0.1:8511` dashboard, `127.0.0.1:8010` API |
-
-Port 10000 because Funnel permits only 443, 8443 and 10000, and the first two
-already serve other things on that host. Tailscale strips the mount prefix
-before proxying, so the API sees `/api/v1/...` and `PUBLIC_API_URL` carries the
-`/sentinel-api` prefix for agents.
-
-The funnel was set up with:
+Both services publish on loopback, so put something in front that terminates
+TLS. Any reverse proxy works; a Tailscale funnel is a quick option that
+provides a certificate automatically:
 
 ```sh
-sudo tailscale set --operator=$USER        # once, so funnel needs no sudo after
-tailscale funnel --bg --https=10000 http://127.0.0.1:8511
-tailscale funnel --bg --https=10000 --set-path=/sentinel-api http://127.0.0.1:8010
+tailscale funnel --bg --https=443 http://127.0.0.1:8501
+tailscale funnel --bg --https=443 --set-path=/api http://127.0.0.1:8000
 ```
 
-Inspect or remove it with `tailscale serve status` and
-`tailscale funnel --https=10000 off`.
+Tailscale strips the mount prefix before proxying, so with that layout
+`PUBLIC_API_URL` carries the `/api` prefix while the application still sees
+clean `/api/v1/...` paths. Funnel permits only ports 443, 8443 and 10000.
 
 Redeploy after changes:
 
 ```sh
-rsync -az --delete --exclude .git --exclude .env ./ fox:~/sentinel/
-ssh fox 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build'
+rsync -az --delete --exclude .git --exclude .env ./ <host>:~/sentinel/
+ssh <host> 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build'
 ```
 
 `--build` is not optional for agent changes. Production does not mount
@@ -166,11 +234,11 @@ ssh fox 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose
 installer embeds is baked into the API image. Syncing the files alone updates
 nothing that gets served.
 
-**The funnel is open to the internet.** Anyone who knows the URL reaches the
-login page, and admin auth is a password with no 2FA and no rate limiting —
-that is v1's stated scope, not an oversight, but it is the thing to tighten
-first if this holds anything sensitive. Change the password with:
+**Anything you expose publicly is reachable by anyone who knows the URL.**
+Admin auth is a password with no 2FA and no rate limiting; that is v1's stated
+scope, not an oversight, but it is the thing to tighten first. Change the
+password with:
 
 ```sh
-ssh fox 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m app.cli reset-admin-password'
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m app.cli reset-admin-password
 ```

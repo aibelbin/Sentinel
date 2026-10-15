@@ -7,3 +7,6 @@ __pycache__/
 venv/
 *.egg-info/
 .DS_Store
+
+# Generated installers contain a device's API key.
+sentinel-install-*.sh

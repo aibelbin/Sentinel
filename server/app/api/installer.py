@@ -6,6 +6,7 @@ from fastapi.responses import PlainTextResponse
 from app.config import get_settings
 from app.deps import current_admin
 from app.schemas import InstallerRequest
+from app.services import agent_release
 from app.services.installer import build_installer
 
 router = APIRouter(tags=["installer"], dependencies=[Depends(current_admin)])
@@ -14,9 +15,11 @@ _MEDIA_TYPE = "text/x-shellscript; charset=utf-8"
 
 
 def _render(body: InstallerRequest) -> str:
+    version, _sha256 = agent_release.current_release()
     try:
         return build_installer(
             get_settings().agent_source_dir,
+            version=version,
             server_url=body.server_url,
             api_key=body.api_key,
             insecure=body.insecure,

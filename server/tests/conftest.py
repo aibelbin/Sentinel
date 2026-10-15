@@ -13,20 +13,51 @@ from sqlalchemy.orm import sessionmaker
 
 TEST_DB_NAME = f"sentinel_test_{uuid.uuid4().hex[:8]}"
 
+# ---------------------------------------------------------------------------
+# DATABASE_URL is redirected HERE, at conftest import time, and not inside a
+# fixture. app/db.py builds its engine at module import and app/config.py
+# caches settings, so any test module that imports app.db -- directly or
+# through app.cli -- would otherwise bind to whatever DATABASE_URL was set
+# when pytest collected it. That happened: a test importing app.cli at module
+# level caused the suite to migrate and TRUNCATE the production database.
+# pytest imports conftest before collecting test modules, so this runs first.
+# ---------------------------------------------------------------------------
+
+_ORIGINAL_DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql+psycopg://sentinel:sentinel@db:5432/sentinel"
+)
+
+
+def _url_for(database: str) -> str:
+    return _ORIGINAL_DATABASE_URL.rsplit("/", 1)[0] + "/" + database
+
 
 def _admin_url() -> str:
     """Connection to the `postgres` database, for CREATE/DROP DATABASE."""
-    base = os.environ.get(
-        "DATABASE_URL", "postgresql+psycopg://sentinel:sentinel@db:5432/sentinel"
-    )
-    return base.rsplit("/", 1)[0] + "/postgres"
+    return _url_for("postgres")
 
 
 def _test_url() -> str:
-    base = os.environ.get(
-        "DATABASE_URL", "postgresql+psycopg://sentinel:sentinel@db:5432/sentinel"
-    )
-    return base.rsplit("/", 1)[0] + "/" + TEST_DB_NAME
+    return _url_for(TEST_DB_NAME)
+
+
+os.environ["DATABASE_URL"] = _test_url()
+
+
+def _assert_scratch_database() -> None:
+    """Refuse to touch anything but the scratch database.
+
+    A belt to the brace above: if the redirect above ever fails to take effect,
+    this fails the suite loudly instead of destroying real data.
+    """
+    from app.db import engine
+
+    actual = engine.url.database
+    if actual != TEST_DB_NAME:
+        raise RuntimeError(
+            f"tests are pointed at database {actual!r}, not the scratch database "
+            f"{TEST_DB_NAME!r}. Refusing to run rather than risk real data."
+        )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -36,9 +67,9 @@ def _database():
         conn.execute(text(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"'))
         conn.execute(text(f'CREATE DATABASE "{TEST_DB_NAME}"'))
 
-    # Settings are cached, and app.db builds its engine at import time, so the
-    # environment has to be set before either is imported.
-    os.environ["DATABASE_URL"] = _test_url()
+    # Checked before any migration runs, so a misdirected suite cannot migrate
+    # or truncate a real database.
+    _assert_scratch_database()
 
     from alembic import command
     from alembic.config import Config
@@ -78,6 +109,7 @@ def _clean_tables(_database):
     """Truncate between tests so each one starts from a known state."""
     from app.db import engine
 
+    _assert_scratch_database()
     yield
     with engine.begin() as conn:
         conn.execute(

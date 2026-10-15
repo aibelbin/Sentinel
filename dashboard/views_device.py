@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+import device_actions
 import format as fmt
 from api_client import Api, ApiError, public_server_url
 
@@ -28,6 +29,13 @@ def _render_header(api: Api, device: dict) -> None:
 
     if not device["enabled"]:
         st.warning("This device is disabled. It cannot authenticate until re-enabled.")
+
+    if device.get("last_update_result") == "reverted":
+        st.warning(
+            f"This machine rolled back an agent update "
+            f"{fmt.relative_time(device.get('last_update_at'))}: "
+            f"{device.get('last_update_detail') or 'no detail reported'}"
+        )
 
     collector_status = device.get("last_collector_status") or {}
     failed = {
@@ -95,6 +103,8 @@ def _render_facts(device: dict) -> None:
 | Load 1/5/15 | {load_text} |
 | Poll interval | {device['config']['poll_interval_seconds']}s |
 | Inventory every | {fmt.duration(device['config']['inventory_interval_seconds'])} |
+| Agent version | `{fmt.short_version(device.get('agent_version'))}` ({fmt.update_badge(device.get('update_status'))}) |
+| Server's version | `{fmt.short_version(device.get('target_agent_version'))}` |
 """
         )
 
@@ -333,21 +343,18 @@ def _render_manage(api: Api, device: dict) -> None:
             st.rerun()
 
     st.subheader("Delete")
-    st.caption("Removes the device and all of its inventory, history and tasks.")
-    confirm = st.text_input(
-        "Type the device name to confirm", key="delete_confirm", placeholder=device["name"]
-    )
-    if st.button("Delete permanently", type="secondary"):
-        if confirm.strip() != device["name"]:
-            st.error("The name does not match; nothing was deleted.")
-        else:
-            try:
-                api.delete(f"/devices/{device['id']}")
-                st.session_state["page"] = "devices"
-                st.session_state.pop("device_id", None)
-                st.rerun()
-            except ApiError as exc:
-                st.error(exc.message)
+    if not device_actions.is_pending(device["id"]):
+        st.caption("Removes the device and all of its inventory, history and tasks.")
+        if st.button("Delete this device…"):
+            device_actions.request_delete(device["id"], device["name"])
+            st.rerun()
+
+    if device_actions.is_pending(device["id"]) and device_actions.render_confirmation(
+        api, package_count=device.get("package_count")
+    ):
+        st.session_state["page"] = "devices"
+        st.session_state.pop("device_id", None)
+        st.rerun()
 
 
 def render(api: Api) -> None:
