@@ -350,14 +350,15 @@ def test_update_status_reflects_the_machine(
 def test_a_revert_is_surfaced(client, auth, device_key, device_auth, agent_source):
     """Only the machine knows it rolled back, so it has to be reported."""
     device_id, _ = device_key
+    version, _ = agent_release.current_release()
     heartbeat(
         client,
         device_auth,
         "0000deadbeef",
         update={
             "result": "reverted",
-            "detail": "abc123 failed to run; fell back to 0000deadbeef",
-            "version": "abc123",
+            "detail": f"{version} failed to run; fell back to 0000deadbeef",
+            "version": version,
         },
     )
 
@@ -365,7 +366,7 @@ def test_a_revert_is_surfaced(client, auth, device_key, device_auth, agent_sourc
     assert detail["update_status"] == "rolled back"
     assert detail["last_update_result"] == "reverted"
     assert "fell back" in detail["last_update_detail"]
-    assert detail["previous_agent_version"] == "abc123"
+    assert detail["previous_agent_version"] == version
 
 
 def test_steady_state_ok_does_not_keep_moving_the_timestamp(
@@ -483,3 +484,150 @@ def test_status_says_not_managed_rather_than_held_back(
     heartbeat(client, device_auth, "1.0.0")
     detail = client.get(f"/api/v1/devices/{device_id}", headers=auth).json()
     assert detail["update_status"] == "not managed"
+
+
+# --------------------------------------------------------------------------- #
+# A version that installs and then cannot run
+# --------------------------------------------------------------------------- #
+
+
+def test_a_reverted_version_is_quarantined(
+    client, auth, device_key, device_auth, agent_source, db
+):
+    """The swap succeeded, so the job was reported completed. A revert is the
+    only signal that the version could not actually run, and without acting on
+    it the server kept re-pushing the same broken build."""
+    version, _ = agent_release.current_release()
+    heartbeat(client, device_auth, "0000deadbeef")
+
+    heartbeat(
+        client, device_auth, "0000deadbeef",
+        update={"result": "reverted", "detail": "never completed a beat",
+                "version": version},
+    )
+
+    release = db.get(AgentRelease, version)
+    db.refresh(release)
+    assert release.quarantined_at is not None
+    assert "never completed a beat" in release.failure_reason
+
+
+def test_a_machine_that_reverted_is_not_offered_the_same_version_again(
+    client, auth, device_key, device_auth, agent_source, db
+):
+    version, _ = agent_release.current_release()
+    heartbeat(
+        client, device_auth, "0000deadbeef",
+        update={"result": "reverted", "detail": "crashed", "version": version},
+    )
+    # Quarantine lifted, so only the per-machine guard is under test.
+    release = db.get(AgentRelease, version)
+    db.refresh(release)
+    release.quarantined_at = None
+    db.commit()
+
+    assert heartbeat(client, device_auth, "0000deadbeef").json()["tasks"] == []
+
+
+def test_a_revert_of_an_older_version_does_not_block_the_current_one(
+    client, device_auth, agent_source, db
+):
+    """A machine that rolled back once must still receive later versions."""
+    # The same heartbeat that carries the report also delivers the job.
+    tasks = heartbeat(
+        client, device_auth, "0000deadbeef",
+        update={"result": "reverted", "detail": "old failure", "version": "999999999999"},
+    ).json()["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["params"]["version"] == agent_release.current_release()[0]
+
+
+def test_rolled_back_status_is_not_sticky(
+    client, auth, device_key, device_auth, agent_source
+):
+    device_id, _ = device_key
+    heartbeat(
+        client, device_auth, "0000deadbeef",
+        update={"result": "reverted", "detail": "old failure", "version": "999999999999"},
+    )
+    detail = client.get(f"/api/v1/devices/{device_id}", headers=auth).json()
+    # The revert was about a version no longer being offered, so the useful
+    # state is that this machine is behind.
+    assert detail["update_status"] == "update pending"
+
+
+# --------------------------------------------------------------------------- #
+# Only a build failure withholds a version from the fleet
+# --------------------------------------------------------------------------- #
+
+
+def test_a_fetch_failure_does_not_quarantine(
+    client, device_auth, agent_source, db
+):
+    """One machine's network blip must not take a healthy release away from
+    everyone else."""
+    heartbeat(client, device_auth, "0000deadbeef")
+    task = db.execute(select(Task).where(Task.type == "update_agent")).scalar_one()
+    client.post(
+        f"/api/v1/agent/tasks/{task.id}/result",
+        json={
+            "status": "failed",
+            "result": {"kind": "transient"},
+            "error": "could not fetch the bundle: timed out",
+        },
+        headers=device_auth,
+    )
+    version, _ = agent_release.current_release()
+    release = db.get(AgentRelease, version)
+    db.refresh(release)
+    assert release.quarantined_at is None
+
+
+def test_a_build_failure_still_quarantines_when_typed(
+    client, device_auth, agent_source, db
+):
+    heartbeat(client, device_auth, "0000deadbeef")
+    task = db.execute(select(Task).where(Task.type == "update_agent")).scalar_one()
+    client.post(
+        f"/api/v1/agent/tasks/{task.id}/result",
+        json={
+            "status": "failed",
+            "result": {"kind": "build"},
+            "error": "self-test failed: cannot import collectors",
+        },
+        headers=device_auth,
+    )
+    version, _ = agent_release.current_release()
+    release = db.get(AgentRelease, version)
+    db.refresh(release)
+    assert release.quarantined_at is not None
+
+
+@pytest.mark.parametrize(
+    ("kind", "error", "expected"),
+    [
+        ("build", "self-test failed", True),
+        ("transient", "timed out", False),
+        ("unsupported", "unsupported task type", False),
+        (None, "checksum mismatch", True),
+        (None, "could not fetch the bundle: timed out", False),
+        (None, "unsupported task type: 'update_agent'", False),
+    ],
+)
+def test_build_failure_classification(kind, error, expected):
+    assert agent_release.is_build_failure(kind, error) is expected
+
+
+# --------------------------------------------------------------------------- #
+# The release row under a fleet-wide first heartbeat
+# --------------------------------------------------------------------------- #
+
+
+def test_recording_a_release_twice_is_safe(agent_source, db):
+    """After a deploy the whole fleet races to insert the same row; the loser
+    used to raise UniqueViolation and 500 the heartbeat."""
+    first = agent_release.record(db)
+    db.commit()
+    second = agent_release.record(db)
+    db.commit()
+    assert first.version == second.version

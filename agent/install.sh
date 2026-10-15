@@ -201,21 +201,21 @@ install_files() {
     staging="$(mktemp -d "${INSTALL_DIR%/}.staging.XXXXXX" 2>/dev/null || true)"
     [ -n "$staging" ] || staging="${INSTALL_DIR}.staging.$$"
     rm -rf "$staging"
-    mkdir -p "$staging/versions/$version" "$staging/bin"
+    mkdir -p "$staging/live/versions/$version" "$staging/bin"
 
     if [ -n "$FROM_SOURCE" ]; then
         if [ ! -d "$FROM_SOURCE/sentinel_agent" ] || [ ! -d "$FROM_SOURCE/bin" ]; then
             rm -rf "$staging"
             die "--from-source $FROM_SOURCE must contain sentinel_agent/ and bin/"
         fi
-        cp -R "$FROM_SOURCE/sentinel_agent" "$staging/versions/$version/"
+        cp -R "$FROM_SOURCE/sentinel_agent" "$staging/live/versions/$version/"
         cp -R "$FROM_SOURCE/bin/." "$staging/bin/"
     else
         if [ -z "$AGENT_BUNDLE_B64" ] || [ -z "$LAUNCHER_B64" ]; then
             rm -rf "$staging"
             die "this installer has no embedded agent bundle; pass --from-source DIR"
         fi
-        if ! printf '%s' "$AGENT_BUNDLE_B64" | base64 -d | tar -xz -C "$staging/versions/$version"; then
+        if ! printf '%s' "$AGENT_BUNDLE_B64" | base64 -d | tar -xz -C "$staging/live/versions/$version"; then
             rm -rf "$staging"
             die "could not unpack the embedded agent bundle"
         fi
@@ -229,19 +229,24 @@ install_files() {
         rm -rf "$staging"
         die "launcher missing after unpack; nothing was changed"
     fi
-    if [ ! -f "$staging/versions/$version/sentinel_agent/cli.py" ]; then
+    if [ ! -f "$staging/live/versions/$version/sentinel_agent/cli.py" ]; then
         rm -rf "$staging"
         die "agent code missing after unpack; nothing was changed"
     fi
 
-    ln -sfn "versions/$version" "$staging/current"
+    ln -sfn "versions/$version" "$staging/live/current"
 
     find "$staging" -type d -exec chmod 755 {} +
     find "$staging" -type f -exec chmod 644 {} +
     chmod 755 "$staging/bin/sentinel-agent"
-    # Owned by the agent's own user: updates are applied by the agent itself,
-    # with no elevated privileges anywhere in the update path.
-    chown -R "$AGENT_USER:$AGENT_USER" "$staging"
+
+    # Only live/ belongs to the agent. The root and bin/ stay root-owned,
+    # because write permission on a directory allows deleting or renaming
+    # anything inside it regardless of owner -- an agent-writable root would
+    # let the agent replace the launcher, which gets executed as root by a
+    # reinstall or by `sudo sentinel-agent`.
+    chown -R root:root "$staging"
+    chown -R "$AGENT_USER:$AGENT_USER" "$staging/live"
 
     # Swap: the old tree only goes away once the new one is in place.
     rm -rf "${INSTALL_DIR}.old"
@@ -296,9 +301,11 @@ enroll() {
         args+=(--insecure)
     fi
 
-    # Enrollment runs as root so it can write into /etc, then ownership is
-    # handed to the agent user below.
-    if ! "$INSTALL_DIR/bin/sentinel-agent" --quiet enroll "${args[@]}"; then
+    # Run as the agent user, not root: the code being executed lives in an
+    # agent-writable tree, so running it as root would hand a compromised
+    # agent account root execution on every reinstall.
+    chown "$AGENT_USER:$AGENT_USER" "$CONFIG_DIR"
+    if ! run_as_agent "$INSTALL_DIR/bin/sentinel-agent" --quiet enroll "${args[@]}"; then
         if [ "$CREATED_INSTALL" -eq 1 ]; then
             warn "enrollment failed; removing the partial install"
             remove_everything
@@ -331,11 +338,34 @@ verify() {
     info "Verifying"
     # Run as the agent user, which is what cron will do: this catches a
     # permissions mistake now rather than silently at the next tick.
-    if run_as_agent "$INSTALL_DIR/bin/sentinel-agent" beat; then
-        ok "first beat succeeded"
+    run_as_agent "$INSTALL_DIR/bin/sentinel-agent" beat || true
+
+    # A zero exit is not proof: a beat also exits zero when another run holds
+    # the lock, and when the server is unreachable. Ask the agent whether the
+    # server actually answered.
+    local contacted
+    contacted=$(run_as_agent "$INSTALL_DIR/bin/sentinel-agent" status 2>/dev/null \
+        | python3 -c '"'"'
+import json, sys
+from datetime import datetime, timezone
+try:
+    at = json.load(sys.stdin).get("last_contact_at")
+except Exception:
+    print("no"); raise SystemExit(0)
+if not at:
+    print("no"); raise SystemExit(0)
+seen = datetime.fromisoformat(at)
+if seen.tzinfo is None:
+    seen = seen.replace(tzinfo=timezone.utc)
+age = (datetime.now(timezone.utc) - seen).total_seconds()
+print("yes" if age < 300 else "no")
+'"'"' 2>/dev/null || echo no)
+
+    if [ "$contacted" = "yes" ]; then
+        ok "the server answered this machine"
     else
-        warn "the first beat did not succeed. The agent is installed and cron"
-        warn "will retry every minute. Inspect: $LOG_DIR/agent.log"
+        warn "the agent is installed, but the server has not answered it yet."
+        warn "cron will retry every minute. Inspect: $LOG_DIR/agent.log"
         return 1
     fi
 
@@ -359,7 +389,7 @@ remove_everything() {
 
 uninstall() {
     info "Removing the Sentinel agent"
-    rm -rf "${INSTALL_DIR}.new" "${INSTALL_DIR}.old"
+    rm -rf "${INSTALL_DIR}.new" "${INSTALL_DIR}.old" "${INSTALL_DIR}".staging.*
     remove_everything
     # Logs are deliberately kept: they are the record of what the agent did.
     ok "removed agent, config, state and cron entry"

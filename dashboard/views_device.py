@@ -349,7 +349,9 @@ def _render_manage(api: Api, device: dict) -> None:
             device_actions.request_delete(device["id"], device["name"])
             st.rerun()
 
-    if device_actions.render_confirmation(api, package_count=device.get("package_count")):
+    if device_actions.is_pending(device["id"]) and device_actions.render_confirmation(
+        api, package_count=device.get("package_count")
+    ):
         st.session_state["page"] = "devices"
         st.session_state.pop("device_id", None)
         st.rerun()

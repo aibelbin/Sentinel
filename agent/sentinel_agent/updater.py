@@ -144,7 +144,7 @@ def _selftest(version_dir: Path) -> None:
 
 def _point_current_at(version: str) -> None:
     target = paths.VERSIONS_DIR / version
-    staging = paths.INSTALL_ROOT / ".current.swap"
+    staging = paths.LIVE_DIR / ".current.swap"
     if staging.is_symlink() or staging.exists():
         staging.unlink()
     staging.symlink_to(target)
@@ -230,9 +230,9 @@ def install(cfg: Config, version: str, sha256: str) -> dict:
         return {"installed": False, "reason": "already running this version",
                 "version": running}
 
-    if not paths.VERSIONS_DIR.parent.is_dir():
+    if not paths.LIVE_DIR.is_dir():
         raise UpdateFailed(
-            f"{paths.INSTALL_ROOT} does not exist; this agent was not installed "
+            f"{paths.LIVE_DIR} does not exist; this agent was not installed "
             "as a versioned layout and cannot update itself"
         )
 
@@ -271,7 +271,10 @@ def install(cfg: Config, version: str, sha256: str) -> dict:
         paths.PENDING_VERSION_PATH.unlink(missing_ok=True)
         raise UpdateFailed(f"could not switch to {version}: {exc}") from exc
 
-    removed = prune({version, fallback})
+    # running is always kept: when it is itself unproven the fallback is an
+    # older version, and without this the directory this very process is
+    # executing from would be deleted mid-beat.
+    removed = prune({version, fallback, running})
     log.info("installed %s, fallback %s, removed %s", version, fallback, removed or "nothing")
 
     return {

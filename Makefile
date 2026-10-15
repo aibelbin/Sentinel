@@ -1,4 +1,4 @@
-.PHONY: help up down restart build logs ps test test-server test-agent test-dashboard sim-enroll sim-collect sim-beat sim-list prune psql shell-api shell-dash clean
+.PHONY: help up down restart build logs ps test test-server test-agent test-dashboard create-device devices sim-enroll sim-collect sim-beat sim-list prune psql shell-api shell-dash clean
 
 COMPOSE := docker compose
 
@@ -58,6 +58,16 @@ sim-list: ## Show what the sim devices report locally
 		echo "--- $$c ---"; \
 		$(COMPOSE) exec -T $$c runuser -u sentinel -- sentinel-agent status 2>/dev/null || echo "not enrolled"; \
 	done
+
+create-device: ## Register a device and save its installer locally (NAME=web-01)
+	@test -n "$(NAME)" || { echo "usage: make create-device NAME=web-01"; exit 1; }
+	@$(COMPOSE) exec -T api python -m app.cli create-device --name "$(NAME)" --stdout \
+		> "sentinel-install-$(NAME).sh"
+	@chmod 600 "sentinel-install-$(NAME).sh"
+	@echo "  wrote sentinel-install-$(NAME).sh (mode 600)"
+
+devices: ## Show the fleet and its agent versions
+	@$(COMPOSE) exec -T api python -m app.cli list-devices
 
 prune: ## Apply the retention policy now
 	$(COMPOSE) exec -T api python -m app.cli prune

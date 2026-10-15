@@ -187,5 +187,15 @@ def render(api: Api) -> None:
         device_actions.request_delete(selected["id"], selected["name"])
         st.rerun()
 
-    if device_actions.render_confirmation(api, package_count=selected.get("package_count")):
-        st.rerun()
+    # Guarded on the armed device: without this, arming delete for one device
+    # and then changing the selectbox shows that device's name beside another
+    # device's package count.
+    if device_actions.is_pending(selected["id"]):
+        if device_actions.render_confirmation(
+            api, package_count=selected.get("package_count")
+        ):
+            st.rerun()
+    elif device_actions.is_pending():
+        # Armed for a device that is no longer selected; drop it rather than
+        # leave a stale panel describing the wrong machine.
+        device_actions.cancel()

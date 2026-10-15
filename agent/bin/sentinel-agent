@@ -20,8 +20,9 @@ from pathlib import Path
 INSTALL_ROOT = Path(os.environ.get("SENTINEL_INSTALL_ROOT", "/opt/sentinel-agent"))
 STATE_DIR = Path(os.environ.get("SENTINEL_STATE_DIR", "/var/lib/sentinel-agent"))
 
-CURRENT = INSTALL_ROOT / "current"
-VERSIONS = INSTALL_ROOT / "versions"
+LIVE = INSTALL_ROOT / "live"
+CURRENT = LIVE / "current"
+VERSIONS = LIVE / "versions"
 PENDING = STATE_DIR / "pending_version.json"
 
 # How long a freshly installed version gets to complete one beat before we
@@ -49,7 +50,7 @@ def _point_current_at(version: str) -> bool:
         _note(f"cannot fall back to {version}: {target} is missing")
         return False
 
-    staging = INSTALL_ROOT / ".current.swap"
+    staging = LIVE / ".current.swap"
     try:
         if staging.is_symlink() or staging.exists():
             staging.unlink()
@@ -96,6 +97,7 @@ def _current_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+
 def _load(root: Path):
     sys.path.insert(0, str(root))
     from sentinel_agent.cli import main
@@ -117,7 +119,12 @@ def main() -> int:
         marker = _read_pending()
         if marker is None or not _revert(marker, "failed to load"):
             raise
+        # The failed import leaves sentinel_agent in sys.modules with __path__
+        # pointing at the bad version, so a plain retry re-imports the same
+        # broken file. Drop it before loading the fallback.
         sys.path.pop(0)
+        for name in [key for key in sys.modules if key.split(".")[0] == "sentinel_agent"]:
+            del sys.modules[name]
         agent_main = _load(_current_root())
 
     return agent_main()

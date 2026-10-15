@@ -54,8 +54,17 @@ new version on their next heartbeat — no installer, no SSH, nothing to upload.
 edit agent code  →  deploy  →  machines update themselves within a minute
 ```
 
-**The version is a hash of the agent source**, so any edit produces a new
-version automatically. There is no number to bump and no way to forget. The
+**The version is a hash of the agent source**, so any edit under
+`agent/sentinel_agent/` produces a new version automatically. There is no
+number to bump and no way to forget.
+
+The one exception is `agent/bin/sentinel-agent`, the launcher. It is
+deliberately outside the update bundle — updates must never be able to replace
+the piece that puts a broken version back — so **editing it does not produce a
+new version and will not reach existing machines.** Changing the launcher means
+re-running the installer, which is why it is kept small and boring.
+
+The
 deployed code is the source of truth, which means reverting your checkout and
 redeploying rolls the fleet back too — `git revert` is a working emergency
 brake.

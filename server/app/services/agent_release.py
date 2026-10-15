@@ -14,6 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -69,13 +70,25 @@ def current_release() -> tuple[str, str]:
 
 
 def record(db: Session) -> AgentRelease:
-    """Make sure the current version has a row, and return it."""
+    """Make sure the current version has a row, and return it.
+
+    Runs on every heartbeat, so after a deploy the whole fleet races to insert
+    the same new row. An upsert rather than get-then-insert, because the loser
+    of that race would otherwise raise UniqueViolation and 500 the heartbeat,
+    losing that beat's resources and task delivery.
+    """
     version, sha256 = current_release()
     row = db.get(AgentRelease, version)
     if row is None:
-        row = AgentRelease(version=version, sha256=sha256)
-        db.add(row)
+        db.execute(
+            pg_insert(AgentRelease)
+            .values(version=version, sha256=sha256)
+            .on_conflict_do_nothing(index_elements=["version"])
+        )
         db.flush()
+        row = db.get(AgentRelease, version)
+        if row is None:
+            raise RuntimeError(f"agent release {version} vanished after upsert")
         log.info("agent release %s is now current", version)
     elif row.sha256 != sha256:
         # Same source hash but a different bundle means the packaging changed
@@ -85,18 +98,33 @@ def record(db: Session) -> AgentRelease:
     return row
 
 
-# An agent that cannot understand the job is not evidence of a bad build, so
-# this failure must not quarantine the release.
-UNSUPPORTED_MARKERS = ("unsupported task type", "unexpected parameters")
+# Only a failure that says something about the build itself should withhold a
+# version from the rest of the fleet. The agent classifies its own failures:
+# "build" means the bundle was wrong, corrupt or could not run; "transient"
+# means it could not be fetched; "unsupported" means the agent predates the
+# mechanism.
+BUILD_FAILURE_KINDS = ("build",)
+
+# Fallback for agents that report no kind at all. Matched against the error
+# text so that an older agent's genuine build failure still counts.
+_NON_BUILD_MARKERS = (
+    "unsupported task type",
+    "unexpected parameters",
+    "could not fetch",
+    "unreachable",
+    "timed out",
+)
+
+
+def is_build_failure(kind: str | None, reason: str) -> bool:
+    if kind is not None:
+        return kind in BUILD_FAILURE_KINDS
+    lowered = (reason or "").lower()
+    return not any(marker in lowered for marker in _NON_BUILD_MARKERS)
 
 
 def quarantine(db: Session, version: str, device_id, reason: str) -> None:
     """Stop handing out a version after a machine reported it failed."""
-    lowered = (reason or "").lower()
-    if any(marker in lowered for marker in UNSUPPORTED_MARKERS):
-        log.info("not quarantining %s: the agent did not understand the job", version)
-        return
-
     row = db.get(AgentRelease, version)
     if row is None or row.quarantined_at is not None:
         return
@@ -155,6 +183,14 @@ def maybe_queue_update(db: Session, device: Device) -> Task | None:
 
     # One attempt per version per machine: without this, a version that fails
     # on a machine would be re-queued on its very next heartbeat, forever.
+    # A machine that already reverted this version must not be offered it
+    # again: the job succeeded, so there is no failed task row to find.
+    if (
+        device.last_update_result == "reverted"
+        and device.previous_agent_version == release.version
+    ):
+        return None
+
     tried = select(func.count()).select_from(Task).where(
         Task.device_id == device.id,
         Task.type == UPDATE_TASK_TYPE,
@@ -184,7 +220,13 @@ def update_status(device: Device, release: AgentRelease | None) -> str:
         return "unknown"
     if device.agent_version == release.version:
         return "up to date"
-    if device.last_update_result == "reverted":
+    # Only while the revert is about the version currently being offered;
+    # otherwise a machine that rolled back once would read "rolled back"
+    # forever, including while it is simply waiting for a newer version.
+    if (
+        device.last_update_result == "reverted"
+        and device.previous_agent_version == release.version
+    ):
         return "rolled back"
     if not manages_updates(device.agent_version):
         # Shown before "held back": the state that matters for these machines

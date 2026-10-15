@@ -66,10 +66,11 @@ def served(raw: bytes, version: str, *, sha256: str | None = None) -> dict:
 def install_root(sandbox, monkeypatch):
     """A versioned install laid out the way the installer leaves it."""
     root = sandbox / "opt"
-    (root / "versions" / "v1" / "sentinel_agent").mkdir(parents=True)
-    (root / "versions" / "v1" / "sentinel_agent" / "cli.py").write_text(GOOD_CLI)
+    live = root / "live"
+    (live / "versions" / "v1" / "sentinel_agent").mkdir(parents=True)
+    (live / "versions" / "v1" / "sentinel_agent" / "cli.py").write_text(GOOD_CLI)
     (root / "bin").mkdir()
-    os.symlink(root / "versions" / "v1", root / "current")
+    os.symlink(live / "versions" / "v1", live / "current")
 
     monkeypatch.setenv("SENTINEL_INSTALL_ROOT", str(root))
     import importlib
@@ -98,8 +99,8 @@ def test_checksum_mismatch_is_refused(install_root, monkeypatch):
     with pytest.raises(updater.UpdateFailed, match="checksum mismatch"):
         updater.install(CONFIG, "v2", "0" * 64)
 
-    assert not (install_root / "versions" / "v2").exists()
-    assert (install_root / "current").resolve().name == "v1"
+    assert not (install_root / "live" / "versions" / "v2").exists()
+    assert (install_root / "live" / "current").resolve().name == "v1"
 
 
 def test_a_version_the_server_did_not_serve_is_refused(install_root, monkeypatch):
@@ -166,8 +167,8 @@ def test_a_release_that_fails_its_selftest_is_not_swapped_in(install_root, monke
     with pytest.raises(updater.UpdateFailed, match="self-test failed"):
         updater.install(CONFIG, "v2", hashlib.sha256(raw).hexdigest())
 
-    assert (install_root / "current").resolve().name == "v1"
-    assert not (install_root / "versions" / "v2").exists()
+    assert (install_root / "live" / "current").resolve().name == "v1"
+    assert not (install_root / "live" / "versions" / "v2").exists()
     assert not paths.PENDING_VERSION_PATH.exists()
 
 
@@ -177,7 +178,7 @@ def test_a_release_that_cannot_import_is_not_swapped_in(install_root, monkeypatc
 
     with pytest.raises(updater.UpdateFailed, match="self-test"):
         updater.install(CONFIG, "v2", hashlib.sha256(raw).hexdigest())
-    assert (install_root / "current").resolve().name == "v1"
+    assert (install_root / "live" / "current").resolve().name == "v1"
 
 
 # --------------------------------------------------------------------------- #
@@ -193,8 +194,8 @@ def test_a_good_release_is_installed_and_becomes_current(install_root, monkeypat
 
     assert outcome["installed"] is True
     assert outcome["previous_version"] == "v1"
-    assert (install_root / "current").resolve().name == "v2"
-    assert (install_root / "versions" / "v2" / "sentinel_agent" / "cli.py").is_file()
+    assert (install_root / "live" / "current").resolve().name == "v2"
+    assert (install_root / "live" / "versions" / "v2" / "sentinel_agent" / "cli.py").is_file()
 
 
 def test_the_previous_version_stays_on_disk(install_root, monkeypatch):
@@ -202,7 +203,7 @@ def test_the_previous_version_stays_on_disk(install_root, monkeypatch):
     raw = make_bundle()
     serve(monkeypatch, served(raw, "v2"))
     updater.install(CONFIG, "v2", hashlib.sha256(raw).hexdigest())
-    assert (install_root / "versions" / "v1").is_dir()
+    assert (install_root / "live" / "versions" / "v1").is_dir()
 
 
 def test_a_marker_puts_the_new_version_on_probation(install_root, monkeypatch):
@@ -238,7 +239,7 @@ def test_shipping_v2_keeps_v1(install_root, monkeypatch):
     raw = make_bundle()
     serve(monkeypatch, served(raw, "v2"))
     updater.install(CONFIG, "v2", hashlib.sha256(raw).hexdigest())
-    assert {p.name for p in (install_root / "versions").iterdir()} == {"v1", "v2"}
+    assert {p.name for p in (install_root / "live" / "versions").iterdir()} == {"v1", "v2"}
 
 
 def test_shipping_v3_drops_v1_once_v2_proved_itself(install_root, monkeypatch):
@@ -252,7 +253,7 @@ def test_shipping_v3_drops_v1_once_v2_proved_itself(install_root, monkeypatch):
     serve(monkeypatch, served(raw, "v3"))
     updater.install(CONFIG, "v3", hashlib.sha256(raw).hexdigest())
 
-    remaining = {p.name for p in (install_root / "versions").iterdir()}
+    remaining = {p.name for p in (install_root / "live" / "versions").iterdir()}
     assert remaining == {"v2", "v3"}
 
 
@@ -270,7 +271,7 @@ def test_an_unproven_version_is_not_used_as_the_fallback(install_root, monkeypat
 
     marker = json.loads(paths.PENDING_VERSION_PATH.read_text())
     assert marker["fallback"] == "v1"
-    assert (install_root / "versions" / "v1").is_dir()
+    assert (install_root / "live" / "versions" / "v1").is_dir()
 
 
 # --------------------------------------------------------------------------- #
@@ -300,10 +301,10 @@ def _run_launcher(sandbox, install_root, extra_env=None):
 def test_launcher_reverts_a_version_that_never_completed_a_beat(sandbox, install_root):
     """The case that would otherwise leave a machine dark with nothing running
     to repair it."""
-    (install_root / "versions" / "v2" / "sentinel_agent").mkdir(parents=True)
-    (install_root / "versions" / "v2" / "sentinel_agent" / "cli.py").write_text(BROKEN_CLI)
-    (install_root / "current").unlink()
-    os.symlink(install_root / "versions" / "v2", install_root / "current")
+    (install_root / "live" / "versions" / "v2" / "sentinel_agent").mkdir(parents=True)
+    (install_root / "live" / "versions" / "v2" / "sentinel_agent" / "cli.py").write_text(BROKEN_CLI)
+    (install_root / "live" / "current").unlink()
+    os.symlink(install_root / "live" / "versions" / "v2", install_root / "live" / "current")
 
     marker = {"version": "v2", "fallback": "v1", "swapped_at": int(time.time()) - 600}
     paths.PENDING_VERSION_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -312,7 +313,7 @@ def test_launcher_reverts_a_version_that_never_completed_a_beat(sandbox, install
     result = _run_launcher(sandbox, install_root)
 
     assert "reverted to v1" in result.stderr
-    assert (install_root / "current").resolve().name == "v1"
+    assert (install_root / "live" / "current").resolve().name == "v1"
     assert not paths.PENDING_VERSION_PATH.exists()
 
 
@@ -325,7 +326,7 @@ def test_launcher_leaves_a_version_alone_inside_its_grace_period(sandbox, instal
     _run_launcher(sandbox, install_root)
 
     assert paths.PENDING_VERSION_PATH.exists()
-    assert (install_root / "current").resolve().name == "v1"
+    assert (install_root / "live" / "current").resolve().name == "v1"
 
 
 def _stub_that_records(path: Path, label: str) -> str:
@@ -339,7 +340,7 @@ def _stub_that_records(path: Path, label: str) -> str:
 def test_launcher_runs_the_code_current_points_at(sandbox, install_root):
     """The launcher's whole job: execute whatever `current` resolves to."""
     receipt = install_root / "ran.txt"
-    (install_root / "versions" / "v1" / "sentinel_agent" / "cli.py").write_text(
+    (install_root / "live" / "versions" / "v1" / "sentinel_agent" / "cli.py").write_text(
         _stub_that_records(receipt, "v1")
     )
 
@@ -353,19 +354,19 @@ def test_launcher_follows_current_to_a_new_version(sandbox, install_root):
     """After an update swaps the symlink, the next run must execute the new
     code without the launcher itself changing."""
     receipt = install_root / "ran.txt"
-    (install_root / "versions" / "v1" / "sentinel_agent" / "cli.py").write_text(
+    (install_root / "live" / "versions" / "v1" / "sentinel_agent" / "cli.py").write_text(
         _stub_that_records(receipt, "v1")
     )
-    (install_root / "versions" / "v2" / "sentinel_agent").mkdir(parents=True)
-    (install_root / "versions" / "v2" / "sentinel_agent" / "cli.py").write_text(
+    (install_root / "live" / "versions" / "v2" / "sentinel_agent").mkdir(parents=True)
+    (install_root / "live" / "versions" / "v2" / "sentinel_agent" / "cli.py").write_text(
         _stub_that_records(receipt, "v2")
     )
 
     _run_launcher(sandbox, install_root)
     assert receipt.read_text() == "v1"
 
-    (install_root / "current").unlink()
-    os.symlink(install_root / "versions" / "v2", install_root / "current")
+    (install_root / "live" / "current").unlink()
+    os.symlink(install_root / "live" / "versions" / "v2", install_root / "live" / "current")
 
     _run_launcher(sandbox, install_root)
     assert receipt.read_text() == "v2"

@@ -21,10 +21,9 @@ DEV_VERSION = f"dev-{__version__}"
 
 def running_version() -> str:
     """The version id of the code currently executing."""
-    # .../versions/<id>/sentinel_agent/version.py -> <id>
+    # .../live/versions/<id>/sentinel_agent/version.py -> <id>
     here = Path(__file__).resolve()
-    candidate = here.parents[2]
-    if candidate.name == paths.VERSIONS_DIR.name and here.parents[1].is_dir():
+    if here.parents[2].name == paths.VERSIONS_DIR.name:
         return here.parents[1].name
     return DEV_VERSION
 

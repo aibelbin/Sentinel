@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     stale_after_intervals: int = 3
     offline_after_intervals: int = 15
 
+    # The address managed devices should report to, baked into installers. Not
+    # the address the API is reached at internally, which is why it cannot be
+    # inferred from the request.
+    public_api_url: str = ""
+
     # Directory holding the agent source that gets bundled into the installer.
     agent_source_dir: str = "/app/agent"
 

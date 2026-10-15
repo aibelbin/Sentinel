@@ -101,12 +101,16 @@ def _store_config(payload: dict | None) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def _record_update_result(result: str, detail: str) -> None:
-    """Remember how the last update went, to report on the next heartbeat."""
+def _record_update_result(result: str, detail: str, version: str | None = None) -> None:
+    """Remember how the last update went, to report on the next heartbeat.
+
+    `version` is the version the result is *about*, which for a revert is the
+    one that failed rather than the fallback now running.
+    """
     state.set(
         LAST_UPDATE_KEY,
         {"result": result, "detail": detail[:500], "at": _now_iso(),
-         "version": running_version()},
+         "version": version or running_version()},
     )
 
 
@@ -137,7 +141,11 @@ def _note_launcher_revert() -> None:
     installed = installed_version()
     if pending and installed and pending != installed:
         log.warning("version %s was reverted; now running %s", pending, installed)
-        _record_update_result("reverted", f"{pending} failed to run; fell back to {installed}")
+        _record_update_result(
+            "reverted",
+            f"{pending} failed to run; fell back to {installed}",
+            version=pending,
+        )
         state.set("seen_pending_version", None)
 
 
@@ -208,21 +216,41 @@ def _inventory_due(agent_config: dict) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+class UpdateAttemptFailed(Exception):
+    """Carries whether the failure says anything about the build itself.
+
+    Only a build failure should make the server withhold a version from the
+    rest of the fleet. A timeout on one machine's network says nothing about
+    the release, and quarantining on it would take a healthy version away from
+    everyone.
+    """
+
+    def __init__(self, message: str, kind: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 def _install_update(cfg: config.Config, *, version: str, sha256: str) -> dict:
     """Install a new agent version, recording the outcome either way."""
     try:
         outcome = updater.install(cfg, version, sha256)
     except updater.UpdateFailed as exc:
-        # Recorded so the next heartbeat carries the reason, and re-raised so
-        # the job is reported failed and the server quarantines the version.
-        _record_update_result("failed", str(exc))
-        raise
+        # The bundle was wrong, corrupt, or could not run: evidence about the
+        # build, so the server should stop handing it out.
+        _record_update_result("failed", str(exc), version=version)
+        raise UpdateAttemptFailed(str(exc), "build") from exc
+    except (TransportError, HttpError) as exc:
+        # Could not fetch it. Transient and local to this machine.
+        _record_update_result("failed", f"could not fetch {version}: {exc}", version=version)
+        raise UpdateAttemptFailed(f"could not fetch the bundle: {exc}", "transient") from exc
 
     if outcome.get("installed"):
         # Remembered so that if the launcher has to revert, the next beat can
         # work out what happened and say so.
         state.set("seen_pending_version", version)
-        _record_update_result("installed", f"{outcome['previous_version']} -> {version}")
+        _record_update_result(
+            "installed", f"{outcome['previous_version']} -> {version}", version=version
+        )
     return outcome
 
 

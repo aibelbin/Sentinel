@@ -8,11 +8,20 @@ CONFIG_PATH = Path(os.environ.get("SENTINEL_CONFIG", "/etc/sentinel-agent/config
 STATE_DIR = Path(os.environ.get("SENTINEL_STATE_DIR", "/var/lib/sentinel-agent"))
 LOG_DIR = Path(os.environ.get("SENTINEL_LOG_DIR", "/var/log/sentinel-agent"))
 
-# Where the agent's own code lives. `bin/sentinel-agent` is the stable
-# entrypoint and is never replaced; everything under versions/ is.
+# Where the agent's own code lives.
+#
+#   <root>/bin/sentinel-agent   stable launcher, root-owned, never replaced
+#   <root>/live/versions/<id>/  agent-owned, replaced by updates
+#   <root>/live/current         symlink the launcher follows
+#
+# The writable area is a subdirectory rather than the root itself: write
+# permission on a directory lets you delete or rename anything in it whatever
+# its owner, so an agent-writable root would let the agent replace the
+# launcher -- which the installer and `sudo sentinel-agent` run as root.
 INSTALL_ROOT = Path(os.environ.get("SENTINEL_INSTALL_ROOT", "/opt/sentinel-agent"))
-VERSIONS_DIR = INSTALL_ROOT / "versions"
-CURRENT_LINK = INSTALL_ROOT / "current"
+LIVE_DIR = INSTALL_ROOT / "live"
+VERSIONS_DIR = LIVE_DIR / "versions"
+CURRENT_LINK = LIVE_DIR / "current"
 
 STATE_DB = STATE_DIR / "state.db"
 LOCK_PATH = STATE_DIR / "agent.lock"

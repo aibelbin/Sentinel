@@ -1,6 +1,7 @@
 """Routes the client agent calls. Authenticated by per-device API key."""
 
 import base64
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -80,7 +81,7 @@ def heartbeat(
     row.uptime_seconds = sample.uptime_seconds
     row.disks = [disk.model_dump() for disk in sample.disks]
 
-    _apply_update_report(device, body.update)
+    _apply_update_report(db, device, body.update)
 
     # Queued here rather than on a schedule: the heartbeat is already the one
     # moment the server knows what a machine is running.
@@ -107,10 +108,25 @@ def heartbeat(
     )
 
 
-def _apply_update_report(device: Device, report: UpdateReport | None) -> None:
-    """Record how the machine's last update went, if it told us."""
+def _apply_update_report(db: Session, device: Device, report: UpdateReport | None) -> None:
+    """Record how the machine's last update went, if it told us.
+
+    A revert is the only signal that a version installed cleanly and then could
+    not run. The job was reported *completed* -- the swap worked -- so without
+    treating this as a failure the server would keep handing the same broken
+    version to the same machine every few minutes, and to the rest of the
+    fleet besides.
+    """
     if report is None or report.result is None:
         return
+
+    if report.result == "reverted" and report.version:
+        agent_release.quarantine(
+            db,
+            report.version,
+            device.id,
+            report.detail or "installed but could not complete a beat; the machine reverted",
+        )
     # "ok" is the steady state a machine reports on every beat once a version
     # is proven; only write when something actually changed, so last_update_at
     # keeps meaning "when the last update happened".
@@ -202,7 +218,15 @@ def submit_task_result(
     # whole fleet going dark.
     if task.type == agent_release.UPDATE_TASK_TYPE and task.status == TaskStatus.failed:
         version = (task.params or {}).get("version")
-        if version:
+        kind = (body.result or {}).get("kind")
+        if version and agent_release.is_build_failure(kind, body.error or ""):
             agent_release.quarantine(db, version, device.id, body.error or "")
+        elif version:
+            # A fetch timeout on one machine says nothing about the release, so
+            # it stays available to everyone else.
+            logging.getLogger(__name__).info(
+                "not quarantining %s: failure on device %s was %s, not the build",
+                version, device.id, kind or "untyped",
+            )
 
     db.commit()
