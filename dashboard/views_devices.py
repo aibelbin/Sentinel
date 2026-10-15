@@ -166,6 +166,7 @@ def render(api: Api) -> None:
                 "Memory": fmt.percent(fmt.memory_used_percent(resources)),
                 "Disk": fmt.percent(fmt.worst_disk_percent(resources)),
                 "Packages": device["package_count"],
+                "Agent": fmt.update_badge(device.get("update_status")),
             }
         )
 

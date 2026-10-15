@@ -13,6 +13,7 @@ from app.db import get_db
 from app.deps import current_admin
 from app.models import (
     AdminUser,
+    AgentRelease,
     Device,
     DeviceKey,
     DevicePackage,
@@ -40,7 +41,7 @@ from app.schemas import (
     TaskHistoryOut,
 )
 from app.security import new_device_key
-from app.services import agent_config
+from app.services import agent_config, agent_release
 from app.status import derive_status
 
 router = APIRouter(prefix="/devices", tags=["devices"], dependencies=[Depends(current_admin)])
@@ -107,6 +108,8 @@ def list_devices(
         ).scalars().all()
     } if device_ids else {}
 
+    release = db.get(AgentRelease, agent_release.current_release()[0])
+
     now = datetime.now(timezone.utc)
     out: list[DeviceSummary] = []
     for device in devices:
@@ -132,6 +135,7 @@ def list_devices(
                 os_version=device.os_version,
                 package_count=counts.get(device.id, 0),
                 resources=_resources_out(resources.get(device.id)),
+                update_status=agent_release.update_status(device, release),
             )
         )
     return out
@@ -167,6 +171,8 @@ def get_device(device_id: uuid.UUID, db: Session = Depends(get_db)) -> DeviceDet
     device = _get_device(db, device_id)
     config = agent_config.resolve(db, device.id)
     count = _package_counts(db, [device.id]).get(device.id, 0)
+    target_version = agent_release.current_release()[0]
+    release = db.get(AgentRelease, target_version)
 
     last_report = db.execute(
         select(InventoryReport)
@@ -200,6 +206,12 @@ def get_device(device_id: uuid.UUID, db: Session = Depends(get_db)) -> DeviceDet
         config=config,
         last_report_at=last_report.collected_at if last_report else None,
         last_collector_status=last_report.collector_status if last_report else {},
+        update_status=agent_release.update_status(device, release),
+        previous_agent_version=device.previous_agent_version,
+        last_update_at=device.last_update_at,
+        last_update_result=device.last_update_result,
+        last_update_detail=device.last_update_detail,
+        target_agent_version=target_version,
     )
 
 

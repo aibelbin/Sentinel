@@ -58,3 +58,28 @@ def _collect_inventory(_params: dict, context: dict) -> dict:
         "change_count": outcome.get("change_count"),
         "spooled": outcome.get("spooled", False),
     }
+
+
+@handler("update_agent", allowed_params=frozenset({"version", "sha256"}))
+def _update_agent(params: dict, context: dict) -> dict:
+    """Install the agent version the server says this machine should run.
+
+    The version and checksum are the only things taken from the server, and
+    both are checked against the bundle before anything is written. No path,
+    URL or command comes from the job.
+    """
+    version = params.get("version")
+    sha256 = params.get("sha256")
+    if not isinstance(version, str) or not version:
+        raise UnsupportedTask("update_agent requires a version")
+    if not isinstance(sha256, str) or len(sha256) != 64:
+        raise UnsupportedTask("update_agent requires a 64-character sha256")
+    if not all(character in "0123456789abcdefABCDEF" for character in sha256):
+        raise UnsupportedTask("sha256 is not hexadecimal")
+    # The version names a directory, so it must not be able to traverse.
+    if not all(character.isalnum() or character in "-._" for character in version):
+        raise UnsupportedTask("version contains unexpected characters")
+    if version.startswith(".") or "/" in version:
+        raise UnsupportedTask("version is not a safe directory name")
+
+    return context["install_update"](version=version, sha256=sha256.lower())

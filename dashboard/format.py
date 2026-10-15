@@ -16,6 +16,16 @@ ECOSYSTEM_LABEL = {
     "java": "Java",
 }
 
+UPDATE_BADGE = {
+    "up to date": "✅ Up to date",
+    "update pending": "⏳ Update pending",
+    "updating": "⬇️ Updating",
+    "rolled back": "↩️ Rolled back",
+    "held back": "⛔ Held back",
+    "not managed": "➖ Not managed",
+    "unknown": "❔ Unknown",
+}
+
 CHANGE_LABEL = {
     "added": "➕ added",
     "removed": "➖ removed",
@@ -26,6 +36,22 @@ CHANGE_LABEL = {
 def status_badge(status: str) -> str:
     icon, label = STATUS_BADGE.get(status, ("⚫", status.title()))
     return f"{icon} {label}"
+
+
+def update_badge(update_status: str | None) -> str:
+    if not update_status:
+        return UPDATE_BADGE["unknown"]
+    return UPDATE_BADGE.get(update_status, update_status)
+
+
+def short_version(version: str | None) -> str:
+    """Versions are source hashes; the first eight characters identify one
+    unambiguously in practice and fit in a table."""
+    if not version:
+        return "—"
+    if version.startswith("dev-"):
+        return version
+    return version[:8]
 
 
 def human_bytes(value: int | None) -> str:

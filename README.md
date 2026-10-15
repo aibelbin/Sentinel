@@ -45,6 +45,76 @@ and key is also available on the same page.
 `PUBLIC_API_URL` in `.env` is the address baked into downloaded installers, so
 it has to be reachable **from the devices** — not `localhost`, once you deploy.
 
+## Updating agents
+
+Agents update themselves. Edit the agent code, deploy, and machines pick up the
+new version on their next heartbeat — no installer, no SSH, nothing to upload.
+
+```
+edit agent code  →  deploy  →  machines update themselves within a minute
+```
+
+**The version is a hash of the agent source**, so any edit produces a new
+version automatically. There is no number to bump and no way to forget. The
+deployed code is the source of truth, which means reverting your checkout and
+redeploying rolls the fleet back too — `git revert` is a working emergency
+brake.
+
+On each machine the code lives in versioned directories with a `current`
+pointer:
+
+```
+/opt/sentinel-agent/
+├── bin/sentinel-agent      stable launcher - updates never replace this
+├── versions/<hash>/        one directory per version
+└── current -> versions/<hash>
+```
+
+**Nothing privileged is involved.** The tree belongs to the agent's own user,
+and swapping the `current` symlink is atomic.
+
+### What stops a bad version taking the fleet down
+
+1. **Checksum.** A truncated or corrupted download is rejected before anything
+   is written.
+2. **Self-test before the swap.** The new code runs its own `selftest` as a
+   separate process. If it cannot even import, nothing is swapped and the
+   running version is untouched.
+3. **Probation.** After a swap, the new version has three minutes to complete
+   one full beat. If it does not, the stable launcher puts the previous version
+   back — this is the only reason that launcher exists.
+4. **Quarantine.** The first machine to report an update failure causes the
+   server to stop offering that version to anyone else, and the dashboard says
+   so. One machine has a bad minute instead of the whole fleet going dark.
+
+The previous version stays on disk until a newer one has proven itself, so
+there is always something known-good to fall back to.
+
+### Seeing where the fleet is
+
+**Settings** shows the current version and how many machines have it. The
+Devices list has an Agent column:
+
+| Shown | Means |
+|---|---|
+| Up to date | running the current version |
+| Update pending | on an older version, not picked up yet — this is what an offline machine looks like |
+| Rolled back | took the version, it failed, reverted itself |
+| Held back | the version is quarantined and is not being offered |
+| Not managed | agent predates self-updating; run the installer once |
+
+A quarantined version clears by itself when you deploy a new one, since
+quarantine applies to one hash. There is also a "try this version again"
+button in Settings for when a failure was a fluke.
+
+### Bootstrapping
+
+An agent installed before self-updating existed cannot update itself to the
+version that adds it — it has no handler for the job. Those machines show
+**Not managed** and need the installer run once; after that they update on
+their own forever. Re-running the installer keeps the device's identity and
+history, so this is not disruptive.
+
 ## How the agent runs
 
 One cron entry, every minute:
@@ -65,9 +135,10 @@ Standard library only, so the installer needs nothing but `python3`.
 Manual use on a device:
 
 ```sh
-sentinel-agent status     # enrollment, last contact, spool depth
+sentinel-agent status     # enrollment, versions on disk, last contact, spool depth
 sentinel-agent collect    # collect and report now
 sentinel-agent beat -v    # one full pass, verbose
+sentinel-agent selftest   # check this build can run (used before an update applies)
 ```
 
 | Path | Contents |

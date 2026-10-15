@@ -75,23 +75,21 @@ def _extract_error(status: int, raw: bytes) -> HttpError:
     return HttpError(status, code, message)
 
 
-def post(config: Config, path: str, payload: dict, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """POST JSON and return the decoded response, or {} for an empty body."""
+def _request(
+    config: Config, path: str, method: str, payload: dict | None, timeout: int
+) -> dict[str, Any]:
     _check_url(config)
 
     url = f"{config.base_url}{path}"
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {config.api_key}",
-            "User-Agent": f"sentinel-agent/{__version__}",
-            "Accept": "application/json",
-        },
-    )
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "User-Agent": f"sentinel-agent/{__version__}",
+        "Accept": "application/json",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=body, method=method, headers=headers)
 
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -108,3 +106,14 @@ def post(config: Config, path: str, payload: dict, timeout: int = DEFAULT_TIMEOU
     except json.JSONDecodeError as exc:
         raise TransportError(f"{url} returned a non-JSON body: {exc}") from exc
     return decoded if isinstance(decoded, dict) else {"data": decoded}
+
+
+def post(config: Config, path: str, payload: dict, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """POST JSON and return the decoded response, or {} for an empty body."""
+    return _request(config, path, "POST", payload, timeout)
+
+
+def get(config: Config, path: str, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """GET JSON. Used to fetch an update bundle, which is larger than a
+    heartbeat, so it gets a longer default timeout."""
+    return _request(config, path, "GET", None, max(timeout, 60))

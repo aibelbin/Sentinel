@@ -296,14 +296,17 @@ def test_task_is_delivered_once_then_marked_running(client, auth, device_key, de
     first = client.post(
         "/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth
     ).json()
-    assert len(first["tasks"]) == 1
-    task_id = first["tasks"][0]["id"]
+    # The heartbeat may also carry an agent update, since this device reports a
+    # version the server is not serving; this test is about the queued job.
+    collects = [t for t in first["tasks"] if t["type"] == "collect_inventory"]
+    assert len(collects) == 1
+    task_id = collects[0]["id"]
 
     # Claimed on delivery, so the next beat does not run it again.
     second = client.post(
         "/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth
     ).json()
-    assert second["tasks"] == []
+    assert [t for t in second["tasks"] if t["type"] == "collect_inventory"] == []
 
     client.post(
         f"/api/v1/agent/tasks/{task_id}/result",
@@ -311,8 +314,11 @@ def test_task_is_delivered_once_then_marked_running(client, auth, device_key, de
         headers=device_auth,
     )
     tasks = client.get(f"/api/v1/devices/{device_id}/tasks", headers=auth).json()
-    assert tasks["items"][0]["status"] == "completed"
-    assert tasks["items"][0]["result"]["package_count"] == 42
+    # Listed newest first, and a heartbeat may have queued an agent update
+    # after this one, so find it by id rather than by position.
+    reported = next(item for item in tasks["items"] if item["id"] == task_id)
+    assert reported["status"] == "completed"
+    assert reported["result"]["package_count"] == 42
 
 
 def test_a_device_cannot_post_a_result_for_another_devices_task(client, auth, device_key):
@@ -358,12 +364,13 @@ def test_abandoned_task_is_flagged(client, auth, device_key, device_auth, db):
     )
     client.post("/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth)
 
-    task = db.query(Task).one()
+    task = db.query(Task).filter(Task.type == "collect_inventory").one()
     task.claimed_at = datetime.now(timezone.utc) - timedelta(hours=2)
     db.commit()
 
     tasks = client.get(f"/api/v1/devices/{device_id}/tasks", headers=auth).json()
-    assert tasks["items"][0]["abandoned"] is True
+    flagged = [t for t in tasks["items"] if t["type"] == "collect_inventory"]
+    assert flagged[0]["abandoned"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -429,24 +436,34 @@ def test_prefilled_installer_embeds_the_credentials(client, auth, device_key):
 
 
 def test_installer_bundle_unpacks_to_a_working_agent(client, auth, tmp_path):
-    """The downloaded script must actually carry the agent, not just claim to."""
+    """The downloaded script must actually carry the agent, not just claim to.
+
+    The agent code and the launcher travel as separate blobs: the launcher is
+    installed once and updates never replace it, so it is deliberately absent
+    from the bundle agents download later.
+    """
     import base64
     import io
     import re
     import tarfile
 
     script = client.get("/api/v1/installer", headers=auth).text
-    match = re.search(r"AGENT_BUNDLE_B64='([A-Za-z0-9+/=]+)'", script)
-    assert match, "no embedded bundle found in the installer"
 
-    raw = base64.b64decode(match.group(1))
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        names = tar.getnames()
+    def members(token: str) -> list[str]:
+        match = re.search(rf"{token}='([A-Za-z0-9+/=]+)'", script)
+        assert match, f"no {token} found in the installer"
+        raw = base64.b64decode(match.group(1))
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+            return tar.getnames()
 
-    assert "bin/sentinel-agent" in names
-    assert "sentinel_agent/cli.py" in names
-    assert "sentinel_agent/collectors/os_pkgs.py" in names
-    assert not any(name.endswith(".pyc") for name in names)
+    agent_names = members("AGENT_BUNDLE_B64")
+    launcher_names = members("LAUNCHER_B64")
+
+    assert "sentinel_agent/cli.py" in agent_names
+    assert "sentinel_agent/collectors/os_pkgs.py" in agent_names
+    assert not any(name.startswith("bin") for name in agent_names)
+    assert "bin/sentinel-agent" in launcher_names
+    assert not any(name.endswith(".pyc") for name in agent_names + launcher_names)
 
 
 # --------------------------------------------------------------------------- #

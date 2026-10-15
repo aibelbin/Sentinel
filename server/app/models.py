@@ -82,7 +82,7 @@ class Device(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     last_seen_at: Mapped[datetime | None] = _ts(nullable=True)
-    agent_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    agent_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Host facts are metadata, never identity. Devices are never matched on them.
     hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -93,6 +93,13 @@ class Device(Base):
     cpu_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cpu_cores: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_memory_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # How this machine's last agent update went. Reported by the agent, because
+    # a machine reverting itself is something only the machine knows.
+    previous_agent_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_update_at: Mapped[datetime | None] = _ts(nullable=True)
+    last_update_result: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_update_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     keys: Mapped[list["DeviceKey"]] = relationship(
         back_populates="device", cascade="all, delete-orphan"
@@ -296,6 +303,32 @@ class AgentConfig(Base):
         BigInteger, nullable=False, server_default="67108864"
     )
     updated_at: Mapped[datetime] = _ts(server_default=func.now(), nullable=False)
+
+
+class AgentRelease(Base):
+    """One row per agent version the server has served.
+
+    The version is a hash of the agent source, so rows accumulate as the code
+    changes and a quarantine naturally applies to exactly one build.
+    """
+
+    __tablename__ = "agent_release"
+
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    first_seen_at: Mapped[datetime] = _ts(server_default=func.now(), nullable=False)
+
+    # Set when a machine reports this version failed to install or run. While
+    # set, the server stops handing the version out to anyone else.
+    quarantined_at: Mapped[datetime | None] = _ts(nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    failure_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("device.id", ondelete="SET NULL"), nullable=True
+    )
+    # Set when an operator clears a quarantine. Failed attempts from before
+    # this moment are ignored, so a retry is a genuinely fresh attempt without
+    # deleting the record of what failed.
+    retry_requested_at: Mapped[datetime | None] = _ts(nullable=True)
 
 
 GLOBAL_CONFIG_ID = 1

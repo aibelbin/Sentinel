@@ -17,14 +17,18 @@ set -euo pipefail
 SERVER_URL='@@SERVER_URL@@'
 API_KEY='@@API_KEY@@'
 INSECURE='@@INSECURE@@'
+AGENT_VERSION='@@AGENT_VERSION@@'
 AGENT_BUNDLE_B64='@@BUNDLE@@'
+LAUNCHER_B64='@@LAUNCHER@@'
 
 # When this script is run straight from the repository the placeholders above
 # are still literal. Treat them as unset so --from-source development works.
 case "$SERVER_URL" in '@@'*) SERVER_URL="" ;; esac
 case "$API_KEY" in '@@'*) API_KEY="" ;; esac
 case "$INSECURE" in '@@'*) INSECURE="" ;; esac
+case "$AGENT_VERSION" in '@@'*) AGENT_VERSION="" ;; esac
 case "$AGENT_BUNDLE_B64" in '@@'*) AGENT_BUNDLE_B64="" ;; esac
+case "$LAUNCHER_B64" in '@@'*) LAUNCHER_B64="" ;; esac
 
 AGENT_USER="sentinel"
 INSTALL_DIR="/opt/sentinel-agent"
@@ -68,6 +72,7 @@ Options:
   --insecure          Allow a plain-HTTP server URL (local testing only)
   --from-source DIR   Install from a local agent directory instead of the
                       embedded bundle (development)
+  --version ID        Version id to install as (defaults to the embedded one)
   --force-reenroll    Re-enroll even if this device is already enrolled
   --uninstall         Remove the agent, leaving the device record on the server
   -h, --help          Show this help
@@ -82,6 +87,8 @@ parse_args() {
             --key)            API_KEY="${2:-}"; shift 2 ;;
             --key=*)          API_KEY="${1#*=}"; shift ;;
             --insecure)       INSECURE=1; shift ;;
+            --version)        AGENT_VERSION="${2:-}"; shift 2 ;;
+            --version=*)      AGENT_VERSION="${1#*=}"; shift ;;
             --from-source)    FROM_SOURCE="${2:-}"; shift 2 ;;
             --from-source=*)  FROM_SOURCE="${1#*=}"; shift ;;
             --force-reenroll) FORCE_REENROLL=1; shift ;;
@@ -184,40 +191,57 @@ install_files() {
     info "Installing agent to $INSTALL_DIR"
     [ -d "$INSTALL_DIR" ] || CREATED_INSTALL=1
 
-    # Staged into a sibling directory and swapped in only once it is known
-    # good. Unpacking over the live install would, on any failure, leave a cron
-    # entry and a symlink pointing at a missing binary -- a device that stops
-    # reporting with no obvious cause.
-    local staging="${INSTALL_DIR}.new"
+    local version="${AGENT_VERSION:-bootstrap}"
+
+    # The agent code goes into versions/<id>/ with a `current` symlink, so that
+    # a future update is a symlink swap and the previous version stays on disk
+    # to fall back to. The launcher in bin/ sits outside versions/ and updates
+    # never replace it.
+    local staging
+    staging="$(mktemp -d "${INSTALL_DIR%/}.staging.XXXXXX" 2>/dev/null || true)"
+    [ -n "$staging" ] || staging="${INSTALL_DIR}.staging.$$"
     rm -rf "$staging"
-    mkdir -p "$staging"
+    mkdir -p "$staging/versions/$version" "$staging/bin"
 
     if [ -n "$FROM_SOURCE" ]; then
         if [ ! -d "$FROM_SOURCE/sentinel_agent" ] || [ ! -d "$FROM_SOURCE/bin" ]; then
             rm -rf "$staging"
             die "--from-source $FROM_SOURCE must contain sentinel_agent/ and bin/"
         fi
-        cp -R "$FROM_SOURCE/sentinel_agent" "$FROM_SOURCE/bin" "$staging/"
+        cp -R "$FROM_SOURCE/sentinel_agent" "$staging/versions/$version/"
+        cp -R "$FROM_SOURCE/bin/." "$staging/bin/"
     else
-        if [ -z "$AGENT_BUNDLE_B64" ]; then
+        if [ -z "$AGENT_BUNDLE_B64" ] || [ -z "$LAUNCHER_B64" ]; then
             rm -rf "$staging"
             die "this installer has no embedded agent bundle; pass --from-source DIR"
         fi
-        if ! printf '%s' "$AGENT_BUNDLE_B64" | base64 -d | tar -xz -C "$staging"; then
+        if ! printf '%s' "$AGENT_BUNDLE_B64" | base64 -d | tar -xz -C "$staging/versions/$version"; then
             rm -rf "$staging"
             die "could not unpack the embedded agent bundle"
+        fi
+        if ! printf '%s' "$LAUNCHER_B64" | base64 -d | tar -xz -C "$staging"; then
+            rm -rf "$staging"
+            die "could not unpack the embedded launcher"
         fi
     fi
 
     if [ ! -f "$staging/bin/sentinel-agent" ]; then
         rm -rf "$staging"
-        die "agent entrypoint missing after unpack; nothing was changed"
+        die "launcher missing after unpack; nothing was changed"
     fi
+    if [ ! -f "$staging/versions/$version/sentinel_agent/cli.py" ]; then
+        rm -rf "$staging"
+        die "agent code missing after unpack; nothing was changed"
+    fi
+
+    ln -sfn "versions/$version" "$staging/current"
 
     find "$staging" -type d -exec chmod 755 {} +
     find "$staging" -type f -exec chmod 644 {} +
     chmod 755 "$staging/bin/sentinel-agent"
-    chown -R root:root "$staging"
+    # Owned by the agent's own user: updates are applied by the agent itself,
+    # with no elevated privileges anywhere in the update path.
+    chown -R "$AGENT_USER:$AGENT_USER" "$staging"
 
     # Swap: the old tree only goes away once the new one is in place.
     rm -rf "${INSTALL_DIR}.old"
@@ -226,13 +250,15 @@ install_files() {
     rm -rf "${INSTALL_DIR}.old"
 
     ln -sfn "$INSTALL_DIR/bin/sentinel-agent" "$SYMLINK"
-    ok "installed $(find "$INSTALL_DIR" -type f | wc -l | tr -d ' ') file(s)"
+    ok "installed version $version"
 
     mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
     chmod 750 "$CONFIG_DIR"
     chmod 700 "$STATE_DIR"
     chmod 750 "$LOG_DIR"
     chown "$AGENT_USER:$AGENT_USER" "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+    # A reinstall supersedes whatever an update was mid-way through.
+    rm -f "$STATE_DIR/pending_version.json"
 }
 
 already_enrolled() {

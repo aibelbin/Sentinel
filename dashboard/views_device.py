@@ -30,6 +30,13 @@ def _render_header(api: Api, device: dict) -> None:
     if not device["enabled"]:
         st.warning("This device is disabled. It cannot authenticate until re-enabled.")
 
+    if device.get("last_update_result") == "reverted":
+        st.warning(
+            f"This machine rolled back an agent update "
+            f"{fmt.relative_time(device.get('last_update_at'))}: "
+            f"{device.get('last_update_detail') or 'no detail reported'}"
+        )
+
     collector_status = device.get("last_collector_status") or {}
     failed = {
         name: detail
@@ -96,6 +103,8 @@ def _render_facts(device: dict) -> None:
 | Load 1/5/15 | {load_text} |
 | Poll interval | {device['config']['poll_interval_seconds']}s |
 | Inventory every | {fmt.duration(device['config']['inventory_interval_seconds'])} |
+| Agent version | `{fmt.short_version(device.get('agent_version'))}` ({fmt.update_badge(device.get('update_status'))}) |
+| Server's version | `{fmt.short_version(device.get('target_agent_version'))}` |
 """
         )
 
