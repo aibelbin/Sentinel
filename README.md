@@ -1,6 +1,6 @@
 # Sentinel
 
-Device inventory and management for Ubuntu machines. A cron-driven agent reports
+Device inventory and management for Ubuntu and Debian machines. A cron-driven agent reports
 host resources and installed software; a dashboard shows what is out there.
 
 This is **v1**, covering enrollment, inventory and the Devices tab. The wider
