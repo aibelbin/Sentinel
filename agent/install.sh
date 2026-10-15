@@ -103,20 +103,50 @@ require_root() {
     [ "$(id -u)" -eq 0 ] || die "must run as root; try: sudo $0 $*"
 }
 
+cron_is_running() {
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -x cron >/dev/null 2>&1 && return 0
+        pgrep -x crond >/dev/null 2>&1 && return 0
+    fi
+    # Minimal images often ship no procps, which made this check report a
+    # working cron as missing. /proc is always there.
+    for comm in /proc/[0-9]*/comm; do
+        [ -r "$comm" ] || continue
+        case "$(cat "$comm" 2>/dev/null)" in
+            cron|crond) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 preflight() {
     info "Checking prerequisites"
 
     [ -r /etc/os-release ] || die "/etc/os-release is missing; this does not look like Ubuntu"
     # shellcheck disable=SC1091
     . /etc/os-release
-    if [ "${ID:-}" != "ubuntu" ]; then
-        die "this installer supports Ubuntu only (found ID=${ID:-unknown})"
-    fi
-    case "${VERSION_ID:-0}" in
-        20.*|21.*|22.*|23.*|24.*|25.*|26.*) : ;;
-        *) die "Ubuntu 20.04 or newer is required (found ${VERSION_ID:-unknown})" ;;
+    # Ubuntu and Debian both, because the collectors are dpkg-based and work
+    # identically on either. The real requirement is python3, and that is
+    # checked explicitly below rather than assumed from the distribution --
+    # which is why this gate does not need to be narrower.
+    case "${ID:-}" in
+        ubuntu)
+            case "${VERSION_ID:-0}" in
+                20.*|21.*|22.*|23.*|24.*|25.*|26.*|27.*) : ;;
+                *) die "Ubuntu 20.04 or newer is required (found ${VERSION_ID:-unknown})" ;;
+            esac
+            ;;
+        debian)
+            case "${VERSION_ID:-0}" in
+                11|12|13|14) : ;;
+                *) die "Debian 11 or newer is required (found ${VERSION_ID:-unknown})" ;;
+            esac
+            ;;
+        *)
+            die "this installer supports Ubuntu and Debian; the collectors read dpkg (found ID=${ID:-unknown})"
+            ;;
     esac
-    ok "Ubuntu ${VERSION_ID}"
+    ok "${PRETTY_NAME:-${ID} ${VERSION_ID}}"
 
     command -v python3 >/dev/null 2>&1 \
         || die "python3 not found. Install it with: apt-get install -y python3"
@@ -137,7 +167,7 @@ preflight() {
     # proof regardless, rather than warning that a working install is broken.
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet cron 2>/dev/null; then
         ok "cron is active"
-    elif pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; then
+    elif cron_is_running; then
         ok "cron is running"
     else
         warn "cron does not appear to be running; the agent will not run until it is"

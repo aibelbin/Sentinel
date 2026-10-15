@@ -45,7 +45,7 @@ Deferred entirely, each to its own spec cycle: software intelligence collection,
 | Agent runtime | Single script invoked by cron; no daemon, no systemd unit | Explicit user requirement: a cron-jobable, manually triggerable background script. Also strictly more robust than a daemon — a failed run has no consequences because the next minute is a fresh process. |
 | Agent dependencies | Python standard library only | The installer then requires only `python3`, which every Ubuntu Server install carries because cloud-init and unattended-upgrades depend on it. No venv creation, no `pip install` on the client, no PyPI reachability during enrollment, no wheel to build. Bash was considered and rejected: parsing the heartbeat response in shell needs `jq`, which Ubuntu does *not* ship, so bash would have meant an `apt install` at enrollment — a worse dependency story than the interpreter that is already present. |
 | Dashboard data path | Streamlit calls FastAPI; never touches PostgreSQL | Keeps §2's promise that the frontend is replaceable. Swapping in React later means writing a client against an API that already exists and is already exercised. |
-| Distributions | Ubuntu 20.04+ only | One package-manager path, and `python3` is guaranteed present rather than merely likely as on minimal Debian. The collector interface keeps Debian or `dnf` support a new module later rather than a rewrite. |
+| Distributions | Ubuntu 20.04+ and Debian 11+ | One package-manager path (dpkg). Originally Ubuntu-only on the grounds that `python3` is guaranteed there and merely likely on Debian — but the installer's preflight checks for `python3` explicitly, so the distribution gate was redundantly strict and excluded working hosts. The collector interface keeps `dnf` a new module later rather than a rewrite. |
 | Background workers | None | v1 has no server-side scheduled processing. Device status is derived at read time from `last_seen_at`. Retention pruning is a CLI command on a cron schedule inside the API container. No Celery, no Redis. |
 
 ---
@@ -395,7 +395,7 @@ Verification is evidence-based: a test run's output, not an assertion that it sh
 Recorded so the parent document can be reconciled later.
 
 1. **No systemd service (§4).** The agent is a cron-invoked script, per explicit user direction. Consequences: §4's restart-on-failure behaviour is inherent rather than configured, and logs go to a rotating file rather than journald. A systemd timer remains a drop-in alternative later for machines wanting catch-up after downtime via `Persistent=true`.
-2. **Ubuntu only, not Linux generally (§2).** v1 targets Ubuntu 20.04+; Debian is excluded because its minimal installs cannot be relied on to carry `python3`. The collector interface keeps other distributions additive.
+2. **Debian-family only, not Linux generally (§2).** v1 targets Ubuntu 20.04+ and Debian 11+, because the collectors read `dpkg`. The collector interface keeps other distributions additive.
 3. **No full inventory snapshots (§14).** Current state plus a change log, for the storage reasons in §6.3. The intent of §14 — reconstructing changes over time — is satisfied.
 4. **Spool has no 30-day age policy (§4).** Size cap only in v1; the age policy is a later tightening.
 5. **Resource history is not stored (§3, §14).** Latest value only.
