@@ -127,38 +127,26 @@ to terminate TLS in front: the agent refuses to send its key over plain HTTP
 unless enrolled with `--insecure`, which is for local testing and is logged
 loudly on every beat.
 
-### Live deployment: fox
+### Behind a reverse proxy
 
-Running on the `fox` VPS, exposed publicly through a Tailscale funnel.
-
-| | |
-|---|---|
-| Dashboard | `https://fox.tailcc00e1.ts.net:10000/` |
-| API (for devices) | `https://fox.tailcc00e1.ts.net:10000/sentinel-api` |
-| Project | `~/sentinel` |
-| Host ports | `127.0.0.1:8511` dashboard, `127.0.0.1:8010` API |
-
-Port 10000 because Funnel permits only 443, 8443 and 10000, and the first two
-already serve other things on that host. Tailscale strips the mount prefix
-before proxying, so the API sees `/api/v1/...` and `PUBLIC_API_URL` carries the
-`/sentinel-api` prefix for agents.
-
-The funnel was set up with:
+Both services publish on loopback, so put something in front that terminates
+TLS. Any reverse proxy works; a Tailscale funnel is a quick option that
+provides a certificate automatically:
 
 ```sh
-sudo tailscale set --operator=$USER        # once, so funnel needs no sudo after
-tailscale funnel --bg --https=10000 http://127.0.0.1:8511
-tailscale funnel --bg --https=10000 --set-path=/sentinel-api http://127.0.0.1:8010
+tailscale funnel --bg --https=443 http://127.0.0.1:8501
+tailscale funnel --bg --https=443 --set-path=/api http://127.0.0.1:8000
 ```
 
-Inspect or remove it with `tailscale serve status` and
-`tailscale funnel --https=10000 off`.
+Tailscale strips the mount prefix before proxying, so with that layout
+`PUBLIC_API_URL` carries the `/api` prefix while the application still sees
+clean `/api/v1/...` paths. Funnel permits only ports 443, 8443 and 10000.
 
 Redeploy after changes:
 
 ```sh
-rsync -az --delete --exclude .git --exclude .env ./ fox:~/sentinel/
-ssh fox 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build'
+rsync -az --delete --exclude .git --exclude .env ./ <host>:~/sentinel/
+ssh <host> 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build'
 ```
 
 `--build` is not optional for agent changes. Production does not mount
@@ -166,11 +154,11 @@ ssh fox 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose
 installer embeds is baked into the API image. Syncing the files alone updates
 nothing that gets served.
 
-**The funnel is open to the internet.** Anyone who knows the URL reaches the
-login page, and admin auth is a password with no 2FA and no rate limiting —
-that is v1's stated scope, not an oversight, but it is the thing to tighten
-first if this holds anything sensitive. Change the password with:
+**Anything you expose publicly is reachable by anyone who knows the URL.**
+Admin auth is a password with no 2FA and no rate limiting; that is v1's stated
+scope, not an oversight, but it is the thing to tighten first. Change the
+password with:
 
 ```sh
-ssh fox 'cd ~/sentinel && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m app.cli reset-admin-password'
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m app.cli reset-admin-password
 ```

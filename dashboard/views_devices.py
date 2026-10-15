@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+import device_actions
 import format as fmt
 from api_client import Api, ApiError, public_server_url
 
@@ -171,9 +172,19 @@ def render(api: Api) -> None:
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
     st.caption("Open a device for its packages, change log and tasks.")
-    names = {device["name"]: device["id"] for device in devices}
-    chosen = st.selectbox("Device", list(names), index=0, label_visibility="collapsed")
-    if st.button(f"Open {chosen}", type="primary"):
-        st.session_state["device_id"] = names[chosen]
+    by_name = {device["name"]: device for device in devices}
+    chosen = st.selectbox("Device", list(by_name), index=0, label_visibility="collapsed")
+    selected = by_name[chosen]
+
+    open_column, delete_column = st.columns([3, 1])
+    if open_column.button(f"Open {chosen}", type="primary", use_container_width=True):
+        st.session_state["device_id"] = selected["id"]
         st.session_state["page"] = "device"
+        device_actions.cancel()
+        st.rerun()
+    if delete_column.button("Delete…", use_container_width=True):
+        device_actions.request_delete(selected["id"], selected["name"])
+        st.rerun()
+
+    if device_actions.render_confirmation(api, package_count=selected.get("package_count")):
         st.rerun()

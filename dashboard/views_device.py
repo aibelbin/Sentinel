@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+import device_actions
 import format as fmt
 from api_client import Api, ApiError, public_server_url
 
@@ -333,21 +334,16 @@ def _render_manage(api: Api, device: dict) -> None:
             st.rerun()
 
     st.subheader("Delete")
-    st.caption("Removes the device and all of its inventory, history and tasks.")
-    confirm = st.text_input(
-        "Type the device name to confirm", key="delete_confirm", placeholder=device["name"]
-    )
-    if st.button("Delete permanently", type="secondary"):
-        if confirm.strip() != device["name"]:
-            st.error("The name does not match; nothing was deleted.")
-        else:
-            try:
-                api.delete(f"/devices/{device['id']}")
-                st.session_state["page"] = "devices"
-                st.session_state.pop("device_id", None)
-                st.rerun()
-            except ApiError as exc:
-                st.error(exc.message)
+    if not device_actions.is_pending(device["id"]):
+        st.caption("Removes the device and all of its inventory, history and tasks.")
+        if st.button("Delete this device…"):
+            device_actions.request_delete(device["id"], device["name"])
+            st.rerun()
+
+    if device_actions.render_confirmation(api, package_count=device.get("package_count")):
+        st.session_state["page"] = "devices"
+        st.session_state.pop("device_id", None)
+        st.rerun()
 
 
 def render(api: Api) -> None:
