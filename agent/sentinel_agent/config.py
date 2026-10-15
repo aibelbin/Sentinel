@@ -1,11 +1,20 @@
 """Enrollment credentials, stored mode 600 and readable only by the agent user."""
 
 import json
+import logging
 import os
+import pwd
 import tempfile
 from dataclasses import asdict, dataclass
 
 from sentinel_agent import paths
+
+log = logging.getLogger("sentinel.config")
+
+# The unprivileged account cron runs the agent as. Enrolment is usually done
+# with sudo, so the file it writes has to end up readable by this account
+# rather than by root.
+AGENT_USER = "sentinel"
 
 
 class NotEnrolled(Exception):
@@ -44,6 +53,46 @@ def load() -> Config:
     )
 
 
+def _hand_to_agent_user(fd: int) -> None:
+    """Give the file to the account that will actually read it.
+
+    Enrolment is normally run with sudo, which would otherwise leave a
+    root-owned mode-600 config that the unprivileged cron job cannot open --
+    the agent would install cleanly and then fail every beat with a permission
+    error. Only meaningful when running as root; otherwise the file already
+    belongs to whoever wrote it.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        account = pwd.getpwnam(AGENT_USER)
+    except KeyError:
+        # No such account, which means this is not a packaged install.
+        return
+    try:
+        os.fchown(fd, account.pw_uid, account.pw_gid)
+    except OSError as exc:
+        log.warning("could not hand %s to %s: %s", paths.CONFIG_PATH, AGENT_USER, exc)
+
+
+def hand_path_to_agent_user(path) -> None:
+    """Give a path to the account the agent runs as, when running as root.
+
+    Enrolment is normally `sudo sentinel-agent enroll`, so anything it creates
+    would otherwise be root-owned and unwritable by the unprivileged cron job.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        account = pwd.getpwnam(AGENT_USER)
+    except KeyError:
+        return
+    try:
+        os.chown(path, account.pw_uid, account.pw_gid)
+    except OSError as exc:
+        log.warning("could not hand %s to %s: %s", path, AGENT_USER, exc)
+
+
 def save(config: Config) -> None:
     """Write atomically, and never leave the key world-readable.
 
@@ -55,6 +104,7 @@ def save(config: Config) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=paths.CONFIG_PATH.parent, prefix=".config-")
     try:
         os.fchmod(fd, 0o600)
+        _hand_to_agent_user(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(asdict(config), handle, indent=2, sort_keys=True)
             handle.write("\n")

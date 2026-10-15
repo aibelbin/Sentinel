@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs before the package's files are removed.
+#
+# Takes the cron entry away first, so no beat starts while the code it would
+# run is being deleted underneath it.
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        rm -f /etc/cron.d/sentinel-agent
+        ;;
+    failed-upgrade) ;;
+esac
+
+exit 0

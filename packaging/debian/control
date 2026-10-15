@@ -1,0 +1,19 @@
+Package: sentinel-agent
+Version: @@DEB_VERSION@@
+Architecture: all
+Maintainer: Aibel Bin Zacariah <aibelbinzacariah@gmail.com>
+Section: admin
+Priority: optional
+Depends: python3 (>= 3.8), cron
+Homepage: https://github.com/aibelbin/Sentinel
+Description: Sentinel device inventory agent
+ Reports installed software, host details and system resources to a Sentinel
+ server, and applies agent updates the server publishes.
+ .
+ The agent is Python standard library only and runs unprivileged from a cron
+ entry. Declaring python3 and cron here is the whole reason this package
+ exists: apt resolves them, so no machine has to be prepared by hand.
+ .
+ Installing this package does not enrol the machine. Run
+ "sentinel-agent enroll --server URL --key KEY" afterwards with the key issued
+ for that device.

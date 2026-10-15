@@ -39,6 +39,7 @@ CRON_FILE="/etc/cron.d/sentinel-agent"
 SYMLINK="/usr/local/bin/sentinel-agent"
 
 FROM_SOURCE=""
+INSTALL_DEPS=0
 FORCE_REENROLL=0
 DO_UNINSTALL=0
 SKIP_ENROLL=0
@@ -70,6 +71,10 @@ Options:
   --server URL        Platform base URL
   --key KEY           Device API key from the dashboard
   --insecure          Allow a plain-HTTP server URL (local testing only)
+  --install-deps      apt-get install anything missing (python3, cron). Off by
+                      default: installing packages on someone else's machine
+                      should be asked for, not assumed. The .deb does this
+                      properly via apt dependency resolution.
   --from-source DIR   Install from a local agent directory instead of the
                       embedded bundle (development)
   --version ID        Version id to install as (defaults to the embedded one)
@@ -87,6 +92,7 @@ parse_args() {
             --key)            API_KEY="${2:-}"; shift 2 ;;
             --key=*)          API_KEY="${1#*=}"; shift ;;
             --insecure)       INSECURE=1; shift ;;
+            --install-deps)   INSTALL_DEPS=1; shift ;;
             --version)        AGENT_VERSION="${2:-}"; shift 2 ;;
             --version=*)      AGENT_VERSION="${1#*=}"; shift ;;
             --from-source)    FROM_SOURCE="${2:-}"; shift 2 ;;
@@ -101,6 +107,19 @@ parse_args() {
 
 require_root() {
     [ "$(id -u)" -eq 0 ] || die "must run as root; try: sudo $0 $*"
+}
+
+maybe_install() {
+    # $1 command to look for, $2 package that provides it.
+    command -v "$1" >/dev/null 2>&1 && return 0
+    [ "$INSTALL_DEPS" -eq 1 ] || return 0
+    info "installing $2 (--install-deps)"
+    if ! (apt-get update -qq >/dev/null 2>&1 && \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$2" >/dev/null 2>&1); then
+        warn "could not install $2"
+        return 0
+    fi
+    ok "installed $2"
 }
 
 cron_is_running() {
@@ -148,8 +167,9 @@ preflight() {
     esac
     ok "${PRETTY_NAME:-${ID} ${VERSION_ID}}"
 
+    maybe_install python3 python3
     command -v python3 >/dev/null 2>&1 \
-        || die "python3 not found. Install it with: apt-get install -y python3"
+        || die "python3 not found. Install it with: apt-get install -y python3, or pass --install-deps"
     if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)'; then
         die "python3 >= 3.8 is required (found $(python3 --version 2>&1))"
     fi
@@ -158,8 +178,9 @@ preflight() {
     command -v dpkg-query >/dev/null 2>&1 || die "dpkg-query not found"
     ok "dpkg-query present"
 
+    maybe_install cron cron
     if ! command -v crontab >/dev/null 2>&1 && [ ! -d /etc/cron.d ]; then
-        die "cron not found. Install it with: apt-get install -y cron"
+        die "cron not found. Install it with: apt-get install -y cron, or pass --install-deps"
     fi
     # Checked in order of reliability. systemctl is authoritative on a normal
     # host, but the binary exists on images where systemd is not PID 1, where
@@ -169,9 +190,29 @@ preflight() {
         ok "cron is active"
     elif cron_is_running; then
         ok "cron is running"
+    elif [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        # Installed but stopped on a normal host: starting it is the right
+        # thing to do rather than leaving the operator a warning to action.
+        if systemctl enable --now cron >/dev/null 2>&1; then
+            ok "started the cron service"
+        else
+            warn "cron is installed but stopped, and could not be started"
+            warn "start it with: systemctl enable --now cron"
+        fi
+    elif command -v cron >/dev/null 2>&1 || command -v crond >/dev/null 2>&1; then
+        # No init system, which in practice means a container.
+        (cron >/dev/null 2>&1 || crond >/dev/null 2>&1) || true
+        if cron_is_running; then
+            ok "started cron"
+            warn "this machine has no init system, so cron will NOT come back"
+            warn "if it restarts. On a normal host systemd handles that; inside"
+            warn "a container, start cron from the image's entrypoint."
+        else
+            warn "cron is installed but could not be started"
+        fi
     else
-        warn "cron does not appear to be running; the agent will not run until it is"
-        warn "start it with: systemctl enable --now cron"
+        warn "cron is not installed; the agent will not run until it is"
+        warn "install it with: apt-get install -y cron"
     fi
 
     command -v base64 >/dev/null 2>&1 || die "base64 not found (coreutils)"

@@ -1,0 +1,86 @@
+#!/bin/sh
+# Runs after the package's files are unpacked.
+#
+# Creates the unprivileged account the agent runs as, sets up the directories
+# it owns, and schedules it. Enrolment is deliberately NOT done here: a package
+# is identical for every machine and a device key is not, so it cannot carry
+# one.
+set -e
+
+AGENT_USER="sentinel"
+INSTALL_DIR="/opt/sentinel-agent"
+CONFIG_DIR="/etc/sentinel-agent"
+STATE_DIR="/var/lib/sentinel-agent"
+LOG_DIR="/var/log/sentinel-agent"
+CRON_FILE="/etc/cron.d/sentinel-agent"
+VERSION_FILE="$INSTALL_DIR/.packaged-version"
+
+case "$1" in
+    configure)
+        if ! id "$AGENT_USER" >/dev/null 2>&1; then
+            adduser --system --no-create-home --group \
+                --shell /usr/sbin/nologin "$AGENT_USER" >/dev/null
+        fi
+
+        mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+        chmod 750 "$CONFIG_DIR"
+        chmod 700 "$STATE_DIR"
+        chmod 750 "$LOG_DIR"
+        chown "$AGENT_USER:$AGENT_USER" "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+        if [ -f "$CONFIG_DIR/config.json" ]; then
+            chmod 600 "$CONFIG_DIR/config.json"
+            chown "$AGENT_USER:$AGENT_USER" "$CONFIG_DIR/config.json"
+        fi
+
+        # Only live/ is writable by the agent. The install root and bin/ stay
+        # root-owned, because write permission on a directory allows replacing
+        # anything inside it -- an agent-writable root would let the agent
+        # rewrite the launcher, which gets run as root by a reinstall.
+        if [ -d "$INSTALL_DIR/live" ]; then
+            chown -R "$AGENT_USER:$AGENT_USER" "$INSTALL_DIR/live"
+        fi
+
+        # Point `current` at the version this package shipped. A self-updated
+        # machine being reinstalled is reset to the packaged version, which is
+        # the behaviour you want from reinstalling a package.
+        if [ -r "$VERSION_FILE" ]; then
+            packaged=$(cat "$VERSION_FILE")
+            if [ -d "$INSTALL_DIR/live/versions/$packaged" ]; then
+                ln -sfn "versions/$packaged" "$INSTALL_DIR/live/current"
+                chown -h "$AGENT_USER:$AGENT_USER" "$INSTALL_DIR/live/current"
+            fi
+        fi
+        # A reinstall supersedes whatever an update was part-way through.
+        rm -f "$STATE_DIR/pending_version.json"
+
+        cat > "$CRON_FILE" <<EOF
+# Sentinel agent. Managed by the sentinel-agent package.
+# One entry: cron supplies the tick, the agent decides what is due, so the
+# collection schedule stays changeable from the dashboard.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+* * * * * $AGENT_USER $INSTALL_DIR/bin/sentinel-agent --quiet beat
+EOF
+        chmod 644 "$CRON_FILE"
+
+        # cron is a declared dependency so it is installed, but on a machine
+        # with no init system -- a container -- nothing starts it.
+        if ! pgrep -x cron >/dev/null 2>&1 && ! pgrep -x crond >/dev/null 2>&1; then
+            if [ -d /run/systemd/system ]; then
+                systemctl enable --now cron >/dev/null 2>&1 || true
+            else
+                cron >/dev/null 2>&1 || true
+            fi
+        fi
+
+        if [ ! -f "$CONFIG_DIR/config.json" ]; then
+            echo ""
+            echo "sentinel-agent installed but not yet enrolled. Run:"
+            echo "  sudo sentinel-agent enroll --server <url> --key <device key>"
+            echo ""
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure) ;;
+esac
+
+exit 0
