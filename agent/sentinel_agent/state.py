@@ -29,8 +29,17 @@ CREATE INDEX IF NOT EXISTS ix_spool_created ON spool (created_ms, id);
 
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
+    existed = paths.STATE_DB.exists()
     paths.STATE_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(paths.STATE_DB, timeout=30)
+    if not existed:
+        # Created by `sudo sentinel-agent enroll`, so it would belong to root
+        # and the cron job would fail with "attempt to write a readonly
+        # database" on every beat. Handed over as soon as it exists.
+        from sentinel_agent.config import hand_path_to_agent_user
+
+        hand_path_to_agent_user(paths.STATE_DIR)
+        hand_path_to_agent_user(paths.STATE_DB)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)

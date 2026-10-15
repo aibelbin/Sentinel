@@ -1,0 +1,38 @@
+#!/bin/sh
+# Runs after the package's files are removed.
+#
+# `remove` leaves the device's identity and logs alone, so reinstalling keeps
+# the machine's history. `purge` is the explicit "forget this machine" and
+# takes everything, including versions the agent installed itself, which dpkg
+# does not know about.
+set -e
+
+AGENT_USER="sentinel"
+INSTALL_DIR="/opt/sentinel-agent"
+CONFIG_DIR="/etc/sentinel-agent"
+STATE_DIR="/var/lib/sentinel-agent"
+LOG_DIR="/var/log/sentinel-agent"
+
+case "$1" in
+    purge)
+        rm -f /etc/cron.d/sentinel-agent
+        # Self-installed versions live outside the package's file list, so
+        # dpkg leaves them behind; remove the whole tree.
+        rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+        if id "$AGENT_USER" >/dev/null 2>&1; then
+            deluser --system "$AGENT_USER" >/dev/null 2>&1 || true
+        fi
+        echo "sentinel-agent purged. The device record is still on the server;"
+        echo "delete it in the dashboard if the machine is gone for good."
+        ;;
+    remove)
+        # Versions the agent installed itself are not dpkg's to delete, but
+        # leaving a half-populated tree is worse than removing it: the config
+        # and state that identify this machine are kept either way.
+        rm -rf "$INSTALL_DIR/live"
+        echo "sentinel-agent removed. Identity and logs kept; use 'purge' to clear them."
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear) ;;
+esac
+
+exit 0

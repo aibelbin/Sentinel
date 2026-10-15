@@ -334,8 +334,12 @@ def cmd_beat(_args: argparse.Namespace) -> int:
     try:
         cfg = config.load()
     except config.NotEnrolled as exc:
-        log.error("%s", exc)
-        return EXIT_ERROR
+        # Normal between `apt install` and `sentinel-agent enroll`. Exiting
+        # non-zero here would make cron mail the administrator every minute
+        # about a machine that is simply waiting to be enrolled; `status`
+        # is where this is reported, and it does exit non-zero.
+        log.info("%s", exc)
+        return EXIT_OK
 
     with Lock(paths.LOCK_PATH) as acquired:
         if not acquired:

@@ -249,3 +249,72 @@ def test_config_missing_fields_is_not_enrolled():
     paths.CONFIG_PATH.write_text(json.dumps({"server_url": "https://x"}), encoding="utf-8")
     with pytest.raises(config_module.NotEnrolled, match="api_key"):
         config_module.load()
+
+
+def test_config_is_handed_to_the_agent_user_when_written_as_root(monkeypatch, sandbox):
+    """Enrolment is normally run with sudo. Without this the config ends up
+    root-owned mode 600 and every cron beat fails with a permission error --
+    an install that looks clean and then never reports."""
+    import os
+    import pwd
+
+    from sentinel_agent import config as config_module
+
+    chowned: list[tuple] = []
+    monkeypatch.setattr(config_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        config_module.pwd, "getpwnam",
+        lambda name: pwd.struct_passwd(("sentinel", "x", 4242, 4343, "", "/", "/bin/false")),
+    )
+    monkeypatch.setattr(
+        config_module.os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid))
+    )
+
+    config_module.save(CONFIG)
+    assert chowned == [(4242, 4343)]
+    assert paths.CONFIG_PATH.stat().st_mode & 0o777 == 0o600
+
+
+def test_config_is_not_chowned_when_written_unprivileged(monkeypatch, sandbox):
+    from sentinel_agent import config as config_module
+
+    chowned: list[tuple] = []
+    monkeypatch.setattr(config_module.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        config_module.os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid))
+    )
+
+    config_module.save(CONFIG)
+    assert chowned == []
+
+
+def test_config_save_survives_a_missing_agent_account(monkeypatch, sandbox):
+    """A source checkout run as root has no sentinel account; that must not
+    stop enrolment."""
+    from sentinel_agent import config as config_module
+
+    monkeypatch.setattr(config_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        config_module.pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name))
+    )
+    config_module.save(CONFIG)
+    assert config_module.load().api_key == CONFIG.api_key
+
+
+def test_state_db_is_handed_to_the_agent_user_when_created_as_root(monkeypatch, sandbox):
+    """Same failure as the config: a root-created state.db makes every beat
+    fail with "attempt to write a readonly database"."""
+    import pwd
+
+    from sentinel_agent import config as config_module
+
+    handed: list = []
+    monkeypatch.setattr(config_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        config_module.pwd, "getpwnam",
+        lambda name: pwd.struct_passwd(("sentinel", "x", 4242, 4343, "", "/", "/bin/false")),
+    )
+    monkeypatch.setattr(config_module.os, "chown", lambda p, u, g: handed.append((str(p), u, g)))
+
+    state.set("probe", 1)
+    assert any(str(paths.STATE_DB) == p for p, _u, _g in handed), handed

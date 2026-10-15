@@ -1,7 +1,7 @@
 """Operational commands. Run inside the API container.
 
     python -m app.cli seed
-    python -m app.cli create-device --name web-01 [--rotate] [--stdout]
+    python -m app.cli create-device --name web-01 [--deb] [--rotate] [--stdout]
     python -m app.cli list-devices
     python -m app.cli reset-admin-password [--password X]
     python -m app.cli prune [--days N]
@@ -31,7 +31,7 @@ from app.models import (
     Task,
 )
 from app.security import hash_password, new_device_key
-from app.services import agent_config, agent_release
+from app.services import agent_config, agent_release, debian_package
 from app.services.installer import build_installer
 from app.status import derive_status
 
@@ -134,6 +134,33 @@ def cmd_create_device(args: argparse.Namespace) -> int:
         api_key = _issue_key(db, device)
         version, _sha256 = agent_release.current_release()
         agent_release.record(db)
+
+        if args.deb:
+            # The package carries no credentials -- it is identical for every
+            # machine -- so the key is handed over as an enroll command.
+            try:
+                payload = debian_package.build(settings.agent_source_dir, version)
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                db.rollback()
+                print(f"could not build the package: {exc}", file=sys.stderr)
+                return 1
+            db.commit()
+
+            out = Path(args.out) if args.out else Path.cwd() / debian_package.filename(version)
+            if out.is_dir():
+                out = out / debian_package.filename(version)
+            out.write_bytes(payload)
+            insecure_flag = " --insecure" if insecure else ""
+            print(f"{'created' if created else 'rotated key for'} {name}")
+            print(f"  device id : {device.id}")
+            print(f"  version   : {version}")
+            print(f"  package   : {out} ({len(payload)} bytes)")
+            print()
+            print("  On the machine:")
+            print(f"    sudo apt install ./{out.name}")
+            print(f"    sudo sentinel-agent enroll --server {server_url} "
+                  f"--key {api_key}{insecure_flag}")
+            return 0
 
         try:
             script = build_installer(
@@ -291,6 +318,11 @@ def main(argv: list[str] | None = None) -> int:
         help="if the device already exists, issue a new key and revoke the old one",
     )
     create.add_argument("--out", help="where to write the installer")
+    create.add_argument(
+        "--deb",
+        action="store_true",
+        help="write the .deb instead of the script, and print the enroll command",
+    )
     create.add_argument(
         "--stdout",
         action="store_true",

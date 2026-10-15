@@ -27,20 +27,52 @@ admin on first start only and are ignored afterwards; use
 
 ## Adding a device
 
-1. **Devices → Add a device**, give it a name.
-2. Copy the API key it shows. It is stored only as a SHA-256 hash and cannot be
-   shown again — rotate the key if you lose it.
-3. **Download installer for this device.** The script is self-contained: the
-   agent source is embedded as a base64 bundle and the server URL and key are
-   already filled in, so the device needs nothing from apt or PyPI.
-4. On the machine:
+The normal way is the Debian package. It declares `python3` and `cron` as
+dependencies, so apt installs whatever the machine is missing and nothing has
+to be prepared by hand.
+
+1. **Devices → Add a device**, give it a name, and copy the API key. It is
+   stored only as a SHA-256 hash and cannot be shown again — rotate the key if
+   you lose it.
+2. Download the package (**Settings → Agent package**, or
+   `GET /api/v1/agent-package`).
+3. On the machine:
 
    ```sh
-   sudo bash sentinel-install-<name>.sh
+   sudo apt install ./sentinel-agent_1.0.0+<version>_all.deb
+   sudo sentinel-agent enroll --server https://your-server --key sk_dev_...
    ```
 
-The device appears within a minute. A generic installer that prompts for the URL
-and key is also available on the same page.
+Enrolment is a separate step because the package is identical for every
+machine and a device key is not — a package cannot carry one. Until it is
+enrolled the agent sits quietly; it does not fail or mail you.
+
+From the server's own shell, one command does the registration and writes the
+package:
+
+```sh
+docker compose exec -T api python -m app.cli create-device --name web-01 --deb
+```
+
+It prints the `apt install` and `enroll` lines with the key filled in.
+
+### The self-contained script
+
+For machines that cannot reach an apt mirror, the dashboard also offers a
+single shell script with the agent embedded as a base64 bundle and the URL and
+key already filled in:
+
+```sh
+sudo bash sentinel-install-<name>.sh
+```
+
+It installs nothing from the network. Because it bypasses apt it cannot resolve
+dependencies, so it checks for `python3` and `cron` and tells you what is
+missing; pass `--install-deps` to let it apt-install them itself. That is off
+by default — installing packages on someone else's machine should be asked for,
+not assumed.
+
+Either way the device appears within a minute.
 
 `PUBLIC_API_URL` in `.env` is the address baked into downloaded installers, so
 it has to be reachable **from the devices** — not `localhost`, once you deploy.
