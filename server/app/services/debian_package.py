@@ -108,8 +108,29 @@ def _set_modes(root: Path, agent_version: str) -> None:
         (root / "DEBIAN" / script).chmod(0o755)
 
 
+def _packaging_fingerprint() -> tuple:
+    """Newest mtime and total size across the maintainer scripts.
+
+    Part of the build cache key: the scripts are not agent source, so editing
+    one does not change the agent version, and without this a running server
+    would keep serving a .deb built from the old postinst.
+    """
+    newest = 0.0
+    total = 0
+    packaging = _packaging_dir() / "debian"
+    for path in sorted(packaging.iterdir()):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        newest = max(newest, stat.st_mtime)
+        total += stat.st_size
+    return (newest, total)
+
+
 @lru_cache(maxsize=4)
-def _build_cached(agent_source_dir: str, agent_version: str, _fingerprint: tuple) -> bytes:
+def _build_cached(
+    agent_source_dir: str, agent_version: str, _fingerprint: tuple, _packaging: tuple
+) -> bytes:
     agent_source = Path(agent_source_dir)
     if shutil.which("dpkg-deb") is None:
         raise PackageBuildFailed(
@@ -147,7 +168,10 @@ def _build_cached(agent_source_dir: str, agent_version: str, _fingerprint: tuple
 
 def build(agent_source_dir: str, agent_version: str) -> bytes:
     return _build_cached(
-        agent_source_dir, agent_version, source_fingerprint(Path(agent_source_dir))
+        agent_source_dir,
+        agent_version,
+        source_fingerprint(Path(agent_source_dir)),
+        _packaging_fingerprint(),
     )
 
 
