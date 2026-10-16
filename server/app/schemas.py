@@ -236,6 +236,9 @@ class ReleaseOut(BaseModel):
     failure_reason: str | None
     devices_on_version: int
     devices_total: int
+    # Supplied so the dashboard does not have to reconstruct the package
+    # naming scheme, which belongs with the code that builds the package.
+    package_filename: str
 
 
 class DeviceSummary(BaseModel):

@@ -25,6 +25,66 @@ def _installer_bytes(api: Api, api_key: str) -> bytes | None:
         return None
 
 
+def _render_package_route(api: Api, created: dict) -> None:
+    """The normal way in: apt installs the package and resolves python3 and
+    cron, then the device is enrolled with its own key."""
+    try:
+        release = api.get("/agent-release")
+        package = api.get_raw("/agent-package")
+    except ApiError as exc:
+        st.warning(
+            f"Could not build the agent package: {exc.message}. "
+            "Use the script below instead."
+        )
+        return
+
+    server_url = public_server_url()
+    st.markdown(
+        "**Install with the package.** apt pulls in `python3` and `cron`, so "
+        "the machine needs nothing prepared first."
+    )
+    st.download_button(
+        f"⬇️  Download {release['package_filename']}",
+        data=package,
+        file_name=release["package_filename"],
+        mime="application/vnd.debian.binary-package",
+        type="primary",
+    )
+    st.markdown("Then, on the machine:")
+    st.code(
+        f"sudo apt install ./{release['package_filename']}\n"
+        f"sudo sentinel-agent enroll --server {server_url} "
+        f"--key {created['api_key']}"
+        + (" --insecure" if server_url.startswith("http://") else ""),
+        language="bash",
+    )
+    st.caption(
+        "The package is the same for every machine, so it carries no key — "
+        "which is why enrolling is a second step."
+    )
+
+
+def _render_script_route(api: Api, created: dict) -> None:
+    """For machines that cannot reach an apt mirror."""
+    with st.expander("No apt access? Use the self-contained script"):
+        script = _installer_bytes(api, created["api_key"])
+        if not script:
+            return
+        st.markdown(
+            "One file with the agent embedded and this device's URL and key "
+            "already filled in. It installs nothing from the network, so it "
+            "cannot resolve dependencies — the machine needs `python3` and "
+            "`cron`, or pass `--install-deps` to let it install them."
+        )
+        st.download_button(
+            "⬇️  Download installer for this device",
+            data=script,
+            file_name=f"sentinel-install-{created['name']}.sh",
+            mime="text/x-shellscript",
+        )
+        st.code(f"sudo bash sentinel-install-{created['name']}.sh", language="bash")
+
+
 def _render_new_device_panel(api: Api) -> None:
     """Shown once, right after creation, because the key is unrecoverable."""
     created = st.session_state.get("new_device")
@@ -39,20 +99,8 @@ def _render_new_device_panel(api: Api) -> None:
         )
         st.code(created["api_key"], language=None)
 
-        script = _installer_bytes(api, created["api_key"])
-        if script:
-            st.markdown(
-                "The installer below has this device's URL and key already "
-                "filled in. Copy it to the machine and run it:"
-            )
-            st.code(f"sudo bash sentinel-install-{created['name']}.sh", language="bash")
-            st.download_button(
-                "⬇️  Download installer for this device",
-                data=script,
-                file_name=f"sentinel-install-{created['name']}.sh",
-                mime="text/x-shellscript",
-                type="primary",
-            )
+        _render_package_route(api, created)
+        _render_script_route(api, created)
 
         if st.button("Done", key="dismiss_new_device"):
             del st.session_state["new_device"]

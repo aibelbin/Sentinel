@@ -631,3 +631,17 @@ def test_recording_a_release_twice_is_safe(agent_source, db):
     second = agent_release.record(db)
     db.commit()
     assert first.version == second.version
+
+
+def test_release_summary_names_the_package(client, auth, agent_source):
+    """The dashboard offers the .deb for download, so it needs the filename
+    from the code that builds it rather than reconstructing the scheme."""
+    from app.services import debian_package
+
+    version, _ = agent_release.current_release()
+    summary = client.get("/api/v1/agent-release", headers=auth).json()
+
+    assert summary["package_filename"] == debian_package.filename(version)
+    assert summary["package_filename"].startswith("sentinel-agent_")
+    assert summary["package_filename"].endswith("_all.deb")
+    assert version in summary["package_filename"]
