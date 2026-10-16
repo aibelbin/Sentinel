@@ -123,17 +123,22 @@ maybe_install() {
 }
 
 cron_is_running() {
-    if command -v pgrep >/dev/null 2>&1; then
-        pgrep -x cron >/dev/null 2>&1 && return 0
-        pgrep -x crond >/dev/null 2>&1 && return 0
-    fi
-    # Minimal images often ship no procps, which made this check report a
-    # working cron as missing. /proc is always there.
+    # pgrep is deliberately not used: it is missing from minimal images, and
+    # where it exists it also matches a dead cron left as a zombie, which is
+    # exactly the case this check has to catch. /proc is always there.
     for comm in /proc/[0-9]*/comm; do
         [ -r "$comm" ] || continue
         case "$(cat "$comm" 2>/dev/null)" in
-            cron|crond) return 0 ;;
+            cron|crond) ;;
+            *) continue ;;
         esac
+        # A container's main process is the application, not an init system,
+        # so it never reaps its children: a cron that has exited stays in
+        # /proc as a zombie and would otherwise read as running.
+        stat_line=$(cat "${comm%comm}stat" 2>/dev/null) || continue
+        state=${stat_line##*) }
+        [ "${state%% *}" = "Z" ] && continue
+        return 0
     done
     return 1
 }
