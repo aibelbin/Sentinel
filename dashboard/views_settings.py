@@ -25,6 +25,19 @@ def _render_agent_version(api: Api) -> None:
         "changes it automatically. Machines pick it up on their next heartbeat."
     )
 
+    try:
+        package = api.get_raw("/agent-package")
+    except ApiError as exc:
+        st.warning(f"Could not build the agent package: {exc.message}")
+    else:
+        st.download_button(
+            f"⬇️  {release['package_filename']}",
+            data=package,
+            file_name=release["package_filename"],
+            mime="application/vnd.debian.binary-package",
+            help="Install on a machine with apt, then enrol it with its own key.",
+        )
+
     if release["quarantined"]:
         st.error(
             f"**This version is held back.** A machine reported it failed, so it is "

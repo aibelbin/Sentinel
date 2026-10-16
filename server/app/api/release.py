@@ -8,7 +8,7 @@ from app.db import get_db
 from app.deps import current_admin
 from app.models import AgentRelease, Device
 from app.schemas import ReleaseOut
-from app.services import agent_release
+from app.services import agent_release, debian_package
 
 router = APIRouter(prefix="/agent-release", tags=["release"], dependencies=[Depends(current_admin)])
 
@@ -26,6 +26,7 @@ def _to_out(db: Session, row: AgentRelease) -> ReleaseOut:
         failure_reason=row.failure_reason,
         devices_on_version=on_version,
         devices_total=total,
+        package_filename=debian_package.filename(row.version),
     )
 
 
