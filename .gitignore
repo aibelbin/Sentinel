@@ -10,3 +10,6 @@ venv/
 
 # Generated installers contain a device's API key.
 sentinel-install-*.sh
+
+# Local planning docs.
+docs/superpowers/
