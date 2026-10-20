@@ -9,6 +9,7 @@ import streamlit as st
 
 import views_device
 import views_devices
+import views_liva
 import views_settings
 from api_client import Api, ApiError, Unauthorized
 
@@ -16,6 +17,7 @@ st.set_page_config(page_title="Sentinel", page_icon="🛡️", layout="wide")
 
 PAGES = {
     "devices": ("Devices", views_devices.render),
+    "liva": ("Liva", views_liva.render),
     "settings": ("Settings", views_settings.render),
 }
 
@@ -24,6 +26,7 @@ def _clear_session() -> None:
     for key in (
         "token", "username", "page", "device_id", "new_device", "rotated_key",
         "pkg_page", "pkg_view_key", "pending_delete",
+        "liva_chat_id", "liva_bypass", "liva_decision",
     ):
         st.session_state.pop(key, None)
 
