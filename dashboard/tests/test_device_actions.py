@@ -222,7 +222,7 @@ def test_panel_states_what_will_be_lost(st):
     assert "322 packages" in blurb
     assert "change history" in blurb
     assert "no undo" in blurb.lower()
-    # The operator is told the agent keeps beating until it is uninstalled,
+    # The operator is told the watchdog keeps beating until it is uninstalled,
     # which is the surprising part of deleting a live device.
     assert "--uninstall" in blurb
 

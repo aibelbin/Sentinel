@@ -23,7 +23,7 @@ from app.models import (
     GLOBAL_CONFIG_ID,
     AdminSession,
     AdminUser,
-    AgentConfig,
+    WatchdogConfig,
     Device,
     DeviceKey,
     InventoryReport,
@@ -31,7 +31,7 @@ from app.models import (
     Task,
 )
 from app.security import hash_password, new_device_key
-from app.services import agent_config, agent_release, debian_package
+from app.services import watchdog_config, watchdog_release, debian_package
 from app.services.installer import build_installer
 from app.status import derive_status
 
@@ -56,9 +56,9 @@ def cmd_seed(_args: argparse.Namespace) -> int:
             )
             print(f"created admin '{settings.admin_username}'")
 
-        if db.get(AgentConfig, GLOBAL_CONFIG_ID) is None:
-            db.add(AgentConfig(id=GLOBAL_CONFIG_ID, device_id=None))
-            print("created global agent config")
+        if db.get(WatchdogConfig, GLOBAL_CONFIG_ID) is None:
+            db.add(WatchdogConfig(id=GLOBAL_CONFIG_ID, device_id=None))
+            print("created global watchdog config")
 
         db.commit()
     return 0
@@ -132,14 +132,14 @@ def cmd_create_device(args: argparse.Namespace) -> int:
             db.flush()
 
         api_key = _issue_key(db, device)
-        version, _sha256 = agent_release.current_release()
-        agent_release.record(db)
+        version, _sha256 = watchdog_release.current_release()
+        watchdog_release.record(db)
 
         if args.deb:
             # The package carries no credentials -- it is identical for every
             # machine -- so the key is handed over as an enroll command.
             try:
-                payload = debian_package.build(settings.agent_source_dir, version)
+                payload = debian_package.build(settings.watchdog_source_dir, version)
             except Exception as exc:  # noqa: BLE001 - reported, not raised
                 db.rollback()
                 print(f"could not build the package: {exc}", file=sys.stderr)
@@ -158,13 +158,13 @@ def cmd_create_device(args: argparse.Namespace) -> int:
             print()
             print("  On the machine:")
             print(f"    sudo apt install ./{out.name}")
-            print(f"    sudo sentinel-agent enroll --server {server_url} "
+            print(f"    sudo sentinel-watchdog enroll --server {server_url} "
                   f"--key {api_key}{insecure_flag}")
             return 0
 
         try:
             script = build_installer(
-                settings.agent_source_dir,
+                settings.watchdog_source_dir,
                 version=version,
                 server_url=server_url,
                 api_key=api_key,
@@ -216,11 +216,11 @@ def cmd_list_devices(_args: argparse.Namespace) -> int:
             print("no devices registered")
             return 0
 
-        release = agent_release.record(db)
+        release = watchdog_release.record(db)
         db.commit()
 
-        configs = agent_config.resolve_many(db, [d.id for d in devices])
-        print(f"{'NAME':<20} {'STATUS':<9} {'AGENT':<14} {'UPDATE':<15} LAST SEEN")
+        configs = watchdog_config.resolve_many(db, [d.id for d in devices])
+        print(f"{'NAME':<20} {'STATUS':<9} {'WATCHDOG':<14} {'UPDATE':<15} LAST SEEN")
         for device in devices:
             status = derive_status(
                 enabled=device.enabled,
@@ -229,8 +229,8 @@ def cmd_list_devices(_args: argparse.Namespace) -> int:
             )
             seen = device.last_seen_at.strftime("%Y-%m-%d %H:%M:%SZ") if device.last_seen_at else "never"
             print(
-                f"{device.name:<20} {status:<9} {str(device.agent_version or '-'):<14} "
-                f"{agent_release.update_status(device, release):<15} {seen}"
+                f"{device.name:<20} {status:<9} {str(device.watchdog_version or '-'):<14} "
+                f"{watchdog_release.update_status(device, release):<15} {seen}"
             )
         print(f"\nserver is serving version {release.version}")
     return 0
@@ -330,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     create.set_defaults(func=cmd_create_device)
 
-    sub.add_parser("list-devices", help="show the fleet and its agent versions").set_defaults(
+    sub.add_parser("list-devices", help="show the fleet and its watchdog versions").set_defaults(
         func=cmd_list_devices
     )
 

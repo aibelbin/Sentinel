@@ -32,7 +32,7 @@ def _render_header(api: Api, device: dict) -> None:
 
     if device.get("last_update_result") == "reverted":
         st.warning(
-            f"This machine rolled back an agent update "
+            f"This machine rolled back a watchdog update "
             f"{fmt.relative_time(device.get('last_update_at'))}: "
             f"{device.get('last_update_detail') or 'no detail reported'}"
         )
@@ -84,7 +84,7 @@ def _render_facts(device: dict) -> None:
 """
         )
     with right:
-        st.subheader("Agent")
+        st.subheader("Watchdog")
         load = resources or {}
         load_text = (
             f"{load.get('load_1')} / {load.get('load_5')} / {load.get('load_15')}"
@@ -96,15 +96,15 @@ def _render_facts(device: dict) -> None:
 | | |
 |---|---|
 | Device ID | `{device['id']}` |
-| Agent version | {device.get('agent_version') or '—'} |
+| Watchdog version | {device.get('watchdog_version') or '—'} |
 | Enrolled | {fmt.absolute_time(device.get('created_at'))} |
 | Last seen | {fmt.relative_time(device.get('last_seen_at'))} |
 | Last inventory | {fmt.relative_time(device.get('last_report_at'))} |
 | Load 1/5/15 | {load_text} |
 | Poll interval | {device['config']['poll_interval_seconds']}s |
 | Inventory every | {fmt.duration(device['config']['inventory_interval_seconds'])} |
-| Agent version | `{fmt.short_version(device.get('agent_version'))}` ({fmt.update_badge(device.get('update_status'))}) |
-| Server's version | `{fmt.short_version(device.get('target_agent_version'))}` |
+| Watchdog version | `{fmt.short_version(device.get('watchdog_version'))}` ({fmt.update_badge(device.get('update_status'))}) |
+| Server's version | `{fmt.short_version(device.get('target_watchdog_version'))}` |
 """
         )
 
@@ -294,7 +294,7 @@ def _render_manage(api: Api, device: dict) -> None:
     st.caption(
         "A disabled device is refused at authentication; its history is kept."
         if device["enabled"]
-        else "Enabling lets the agent authenticate again."
+        else "Enabling lets the watchdog authenticate again."
     )
     if st.button(label):
         try:

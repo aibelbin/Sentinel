@@ -29,11 +29,11 @@ def _render_package_route(api: Api, created: dict) -> None:
     """The normal way in: apt installs the package and resolves python3 and
     cron, then the device is enrolled with its own key."""
     try:
-        release = api.get("/agent-release")
-        package = api.get_raw("/agent-package")
+        release = api.get("/watchdog-release")
+        package = api.get_raw("/watchdog-package")
     except ApiError as exc:
         st.warning(
-            f"Could not build the agent package: {exc.message}. "
+            f"Could not build the watchdog package: {exc.message}. "
             "Use the script below instead."
         )
         return
@@ -53,7 +53,7 @@ def _render_package_route(api: Api, created: dict) -> None:
     st.markdown("Then, on the machine:")
     st.code(
         f"sudo apt install ./{release['package_filename']}\n"
-        f"sudo sentinel-agent enroll --server {server_url} "
+        f"sudo sentinel-watchdog enroll --server {server_url} "
         f"--key {created['api_key']}"
         + (" --insecure" if server_url.startswith("http://") else ""),
         language="bash",
@@ -71,7 +71,7 @@ def _render_script_route(api: Api, created: dict) -> None:
         if not script:
             return
         st.markdown(
-            "One file with the agent embedded and this device's URL and key "
+            "One file with the watchdog embedded and this device's URL and key "
             "already filled in. It installs nothing from the network, so it "
             "cannot resolve dependencies — the machine needs `python3` and "
             "`cron`, or pass `--install-deps` to let it install them."
@@ -214,7 +214,7 @@ def render(api: Api) -> None:
                 "Memory": fmt.percent(fmt.memory_used_percent(resources)),
                 "Disk": fmt.percent(fmt.worst_disk_percent(resources)),
                 "Packages": device["package_count"],
-                "Agent": fmt.update_badge(device.get("update_status")),
+                "Watchdog": fmt.update_badge(device.get("update_status")),
             }
         )
 

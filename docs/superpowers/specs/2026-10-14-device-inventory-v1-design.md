@@ -17,8 +17,8 @@
 - Admin authentication (single administrator, password only).
 - Device registration producing a per-device API key.
 - A terminal installer script that enrolls a device and installs a cron entry.
-- A cron-driven agent that reports resources, collects software inventory, executes queued tasks, and spools reports while offline.
-- Backend-delivered agent configuration.
+- A cron-driven watchdog that reports resources, collects software inventory, executes queued tasks, and spools reports while offline.
+- Backend-delivered watchdog configuration.
 - A Devices list and a device detail page.
 
 ### Out of scope for v1
@@ -42,8 +42,8 @@ Deferred entirely, each to its own spec cycle: software intelligence collection,
 | Collector breadth | OS packages, host details, resources, language runtime versions, and system-level language packages | Everything comes from a package-manager query: bounded, fast, deterministic. No filesystem walking and no guessing which directory is a project. |
 | Enrollment | Admin pre-creates the device; one-time key shown once | Matches `project_schema.md` §4.1. Every key is individually revocable and a leaked key compromises exactly one device. |
 | Test target | Simulated Ubuntu containers in Compose | Matches §15. The cron runtime model (below) means these need only `cron`, not `/sbin/init` as PID 1 — so no privileged containers and no cgroup configuration. |
-| Agent runtime | Single script invoked by cron; no daemon, no systemd unit | Explicit user requirement: a cron-jobable, manually triggerable background script. Also strictly more robust than a daemon — a failed run has no consequences because the next minute is a fresh process. |
-| Agent dependencies | Python standard library only | The installer then requires only `python3`, which every Ubuntu Server install carries because cloud-init and unattended-upgrades depend on it. No venv creation, no `pip install` on the client, no PyPI reachability during enrollment, no wheel to build. Bash was considered and rejected: parsing the heartbeat response in shell needs `jq`, which Ubuntu does *not* ship, so bash would have meant an `apt install` at enrollment — a worse dependency story than the interpreter that is already present. |
+| Watchdog runtime | Single script invoked by cron; no daemon, no systemd unit | Explicit user requirement: a cron-jobable, manually triggerable background script. Also strictly more robust than a daemon — a failed run has no consequences because the next minute is a fresh process. |
+| Watchdog dependencies | Python standard library only | The installer then requires only `python3`, which every Ubuntu Server install carries because cloud-init and unattended-upgrades depend on it. No venv creation, no `pip install` on the client, no PyPI reachability during enrollment, no wheel to build. Bash was considered and rejected: parsing the heartbeat response in shell needs `jq`, which Ubuntu does *not* ship, so bash would have meant an `apt install` at enrollment — a worse dependency story than the interpreter that is already present. |
 | Dashboard data path | Streamlit calls FastAPI; never touches PostgreSQL | Keeps §2's promise that the frontend is replaceable. Swapping in React later means writing a client against an API that already exists and is already exercised. |
 | Distributions | Ubuntu 20.04+ and Debian 11+ | One package-manager path (dpkg). Originally Ubuntu-only on the grounds that `python3` is guaranteed there and merely likely on Debian — but the installer's preflight checks for `python3` explicitly, so the distribution gate was redundantly strict and excluded working hosts. The collector interface keeps `dnf` a new module later rather than a rewrite. |
 | Background workers | None | v1 has no server-side scheduled processing. Device status is derived at read time from `last_seen_at`. Retention pruning is a CLI command on a cron schedule inside the API container. No Celery, no Redis. |
@@ -54,7 +54,7 @@ Deferred entirely, each to its own spec cycle: software intelligence collection,
 
 ```text
 Managed Linux device
-  cron (* * * * *) --> sentinel-agent beat
+  cron (* * * * *) --> sentinel-watchdog beat
                           |
                           |  outbound HTTPS, per-device API key
                           v
@@ -65,29 +65,29 @@ Managed Linux device
                    Streamlit dashboard
 ```
 
-Four containers: `db`, `api`, `dashboard`, and in development N× `sim-device`. All traffic is agent-initiated outbound; the server never connects to a device, per `project_schema.md` §3.
+Four containers: `db`, `api`, `dashboard`, and in development N× `sim-device`. All traffic is watchdog-initiated outbound; the server never connects to a device, per `project_schema.md` §3.
 
 Service isolation matters more than image count: `api` and `dashboard` may share a built image and differ only in command.
 
 ---
 
-## 4. The agent
+## 4. The watchdog
 
 ### 4.1 Runtime model
 
 One cron entry drives everything:
 
 ```cron
-# /etc/cron.d/sentinel-agent
-* * * * * sentinel /opt/sentinel-agent/bin/sentinel-agent beat --quiet
+# /etc/cron.d/sentinel-watchdog
+* * * * * sentinel /opt/sentinel-watchdog/bin/sentinel-watchdog beat --quiet
 ```
 
 Several cron entries — one per minute for heartbeat, one twice daily for inventory — were rejected because a schedule living in `/etc/cron.d` on each device cannot be changed from the dashboard, which contradicts the backend-delivered configuration requirement. Cron therefore controls only the tick; the script decides what is due.
 
 A `beat` run, in order:
 
-1. Acquire a non-blocking `flock` on `/var/lib/sentinel-agent/agent.lock`. If held, exit 0 immediately — a slow collection can never pile up invocations.
-2. Sample resources and `POST /api/v1/agent/heartbeat`.
+1. Acquire a non-blocking `flock` on `/var/lib/sentinel-watchdog/watchdog.lock`. If held, exit 0 immediately — a slow collection can never pile up invocations.
+2. Sample resources and `POST /api/v1/watchdog/heartbeat`.
 3. Apply the `config` from the response to local cache; record the pending `tasks`.
 4. If `now - last_collect_at >= inventory_interval_seconds`, run collection and report it.
 5. Execute pending tasks, posting each result.
@@ -100,10 +100,10 @@ Cron's one-minute floor matches the 60-second heartbeat default in §16 exactly.
 
 | Command | Purpose |
 |---|---|
-| `sentinel-agent enroll --server URL --key KEY [--insecure]` | Used by the installer. Writes config, registers, stores the returned device ID. `--insecure` permits a plain-HTTP server URL and is required by the sim devices. |
-| `sentinel-agent beat [-v\|--quiet]` | One full pass as described above. The cron invocation. |
-| `sentinel-agent collect` | Force inventory collection and report now, ignoring the interval. |
-| `sentinel-agent status` | Print enrollment state, server URL, last successful contact, spool depth, cached config. Exit non-zero if never enrolled. |
+| `sentinel-watchdog enroll --server URL --key KEY [--insecure]` | Used by the installer. Writes config, registers, stores the returned device ID. `--insecure` permits a plain-HTTP server URL and is required by the sim devices. |
+| `sentinel-watchdog beat [-v\|--quiet]` | One full pass as described above. The cron invocation. |
+| `sentinel-watchdog collect` | Force inventory collection and report now, ignoring the interval. |
+| `sentinel-watchdog status` | Print enrollment state, server URL, last successful contact, spool depth, cached config. Exit non-zero if never enrolled. |
 
 `collect` and `beat -v` are the manual trigger path; both take the same lock, so a manual run and a cron run cannot overlap.
 
@@ -111,16 +111,16 @@ Cron's one-minute floor matches the 60-second heartbeat default in §16 exactly.
 
 | Path | Mode | Owner | Contents |
 |---|---|---|---|
-| `/opt/sentinel-agent/` | 755 | root | script and modules |
-| `/opt/sentinel-agent/bin/sentinel-agent` | 755 | root | CLI entrypoint |
-| `/usr/local/bin/sentinel-agent` | symlink | root | convenience symlink so the manual commands in §4.2 work from any shell |
-| `/etc/sentinel-agent/config.json` | 600 | sentinel | server URL, device ID, API key |
-| `/var/lib/sentinel-agent/state.db` | 600 | sentinel | SQLite: spool, `last_collect_at`, cached config, previous CPU sample |
-| `/var/lib/sentinel-agent/agent.lock` | 600 | sentinel | flock target |
-| `/var/log/sentinel-agent/agent.log` | 640 | sentinel | rotating log, 5 × 2 MB via stdlib `RotatingFileHandler` |
-| `/etc/cron.d/sentinel-agent` | 644 | root | the entry above |
+| `/opt/sentinel-watchdog/` | 755 | root | script and modules |
+| `/opt/sentinel-watchdog/bin/sentinel-watchdog` | 755 | root | CLI entrypoint |
+| `/usr/local/bin/sentinel-watchdog` | symlink | root | convenience symlink so the manual commands in §4.2 work from any shell |
+| `/etc/sentinel-watchdog/config.json` | 600 | sentinel | server URL, device ID, API key |
+| `/var/lib/sentinel-watchdog/state.db` | 600 | sentinel | SQLite: spool, `last_collect_at`, cached config, previous CPU sample |
+| `/var/lib/sentinel-watchdog/watchdog.lock` | 600 | sentinel | flock target |
+| `/var/log/sentinel-watchdog/watchdog.log` | 640 | sentinel | rotating log, 5 × 2 MB via stdlib `RotatingFileHandler` |
+| `/etc/cron.d/sentinel-watchdog` | 644 | root | the entry above |
 
-The agent runs as a dedicated unprivileged `sentinel` system user with `/usr/sbin/nologin` as its shell. `dpkg-query`, `/proc`, `npm ls -g` and system `pip` are all readable unprivileged, satisfying §13's least-privilege requirement. Only the installer needs root.
+The watchdog runs as a dedicated unprivileged `sentinel` system user with `/usr/sbin/nologin` as its shell. `dpkg-query`, `/proc`, `npm ls -g` and system `pip` are all readable unprivileged, satisfying §13's least-privilege requirement. Only the installer needs root.
 
 **Known limitation:** per-user pyenv installations and virtualenvs inside other users' home directories are not readable by the `sentinel` user and will not be reported. System-level interpreters are what gets inventoried. This is a consequence of running unprivileged and is accepted for v1.
 
@@ -163,21 +163,21 @@ Reports that fail to deliver are appended to a `spool` table in `state.db` with 
 
 ### 4.7 Task execution
 
-v1 defines exactly one task type: `collect_inventory`. The agent executes only task types it has a registered handler for; an unknown type is reported `failed` with `error: "unsupported task type"` rather than ignored, so the dashboard shows the truth. No shell strings are accepted from the server — the task `type` selects a Python function, and `params` are validated against that handler's expected keys. This upholds §4 and §13's prohibition on arbitrary command execution.
+v1 defines exactly one task type: `collect_inventory`. The watchdog executes only task types it has a registered handler for; an unknown type is reported `failed` with `error: "unsupported task type"` rather than ignored, so the dashboard shows the truth. No shell strings are accepted from the server — the task `type` selects a Python function, and `params` are validated against that handler's expected keys. This upholds §4 and §13's prohibition on arbitrary command execution.
 
 ---
 
 ## 5. Installer
 
-`agent/install.sh`, a POSIX shell script the administrator hands to the operator of the target device. Run as root.
+`watchdog/install.sh`, a POSIX shell script the administrator hands to the operator of the target device. Run as root.
 
 1. **Preflight** — confirm Ubuntu 20.04+ via `/etc/os-release`; confirm `python3` ≥ 3.8; confirm `cron` is installed and its service active; confirm `dpkg-query` exists. Any failure aborts naming what is missing and the `apt install` line that fixes it, before anything is written.
 2. **Prompt** — ask interactively for the server URL and the API key. The key prompt disables echo. Both are also accepted as `--server` / `--key` flags for scripted installs, alongside `--insecure`, which is passed through to `enroll`.
 3. **Create** the `sentinel` system user and group if absent.
-4. **Install** the agent files to `/opt/sentinel-agent`, and create `/etc/sentinel-agent`, `/var/lib/sentinel-agent` and `/var/log/sentinel-agent` with the ownership and modes in §4.3.
-5. **Enroll** — run `sentinel-agent enroll`. A rejected key aborts the install and removes what was written, leaving no half-configured device.
-6. **Schedule** — write `/etc/cron.d/sentinel-agent`.
-7. **Verify** — run one `sentinel-agent beat -v` and report the outcome, then print the device ID and a reminder that the device will appear in the dashboard within a minute.
+4. **Install** the watchdog files to `/opt/sentinel-watchdog`, and create `/etc/sentinel-watchdog`, `/var/lib/sentinel-watchdog` and `/var/log/sentinel-watchdog` with the ownership and modes in §4.3.
+5. **Enroll** — run `sentinel-watchdog enroll`. A rejected key aborts the install and removes what was written, leaving no half-configured device.
+6. **Schedule** — write `/etc/cron.d/sentinel-watchdog`.
+7. **Verify** — run one `sentinel-watchdog beat -v` and report the outcome, then print the device ID and a reminder that the device will appear in the dashboard within a minute.
 
 The script is idempotent: re-running it over an existing install updates the files and re-enrolls, preserving the existing device ID unless `--force-reenroll` is given. It also accepts `--uninstall`, which removes the cron entry, files and user but leaves the device record on the server for the administrator to delete.
 
@@ -201,7 +201,7 @@ Opaque random tokens rather than JWTs, because a JWT cannot be revoked without e
 
 ### 6.2 Devices
 
-**`device`** — `id` (UUID PK, platform-generated), `name`, `created_at`, `enabled` (bool), `last_seen_at`, `agent_version`, and host facts: `hostname`, `os_name`, `os_version`, `kernel`, `arch`, `cpu_model`, `cpu_cores`, `total_memory_bytes`.
+**`device`** — `id` (UUID PK, platform-generated), `name`, `created_at`, `enabled` (bool), `last_seen_at`, `watchdog_version`, and host facts: `hostname`, `os_name`, `os_version`, `kernel`, `arch`, `cpu_model`, `cpu_cores`, `total_memory_bytes`.
 
 Host facts are metadata, never identity, per §4. Devices are never matched or merged on hostname.
 
@@ -227,9 +227,9 @@ Current state. `scope` discriminates where on the device the package lives: `sys
 
 **`package_change`** — `id`, `device_id`, `package_id`, `scope`, `change_type` (enum: `added`, `removed`, `version_changed`), `old_version`, `new_version`, `detected_at`, `report_id`.
 
-**`inventory_report`** — `id`, `device_id`, `collected_at` (agent clock), `received_at` (server clock), `package_count`, `collector_status` (JSONB), `change_count`.
+**`inventory_report`** — `id`, `device_id`, `collected_at` (watchdog clock), `received_at` (server clock), `package_count`, `collector_status` (JSONB), `change_count`.
 
-Both timestamps are kept because a spooled report arrives long after collection, and §4 requires the server to stitch history from the agent's timestamps.
+Both timestamps are kept because a spooled report arrives long after collection, and §4 requires the server to stitch history from the watchdog's timestamps.
 
 **Diffing** happens server-side on report receipt, inside one transaction: load the device's current `device_package` rows, compare against the report, write `package_change` rows for the difference, then update `device_package`. Comparison is string inequality on the version — v1 needs no ordering, only change detection.
 
@@ -241,7 +241,7 @@ Both timestamps are kept because a spooled report arrives long after collection,
 
 A task moves to `running` when delivered in a heartbeat response, satisfying §4's duplicate-execution concern. A task `running` for longer than 30 minutes is treated as abandoned and shown as such; v1 does not auto-retry.
 
-**`agent_config`** — `id`, `device_id` (nullable — `NULL` is the global default row), `poll_interval_seconds` (default 60), `inventory_interval_seconds` (default 43200), `spool_max_bytes` (default 67108864), `updated_at`.
+**`watchdog_config`** — `id`, `device_id` (nullable — `NULL` is the global default row), `poll_interval_seconds` (default 60), `inventory_interval_seconds` (default 43200), `spool_max_bytes` (default 67108864), `updated_at`.
 
 Resolution is per-device row if present, else the global row. Returned in every heartbeat response.
 
@@ -253,18 +253,18 @@ A `prune` subcommand of `app/cli.py`, run daily at 03:00 UTC by a cron entry bak
 
 ## 7. API
 
-FastAPI, all routes under `/api/v1`, Pydantic v2 request and response models. OpenAPI is the agent's contract document.
+FastAPI, all routes under `/api/v1`, Pydantic v2 request and response models. OpenAPI is the watchdog's contract document.
 
-### 7.1 Agent routes
+### 7.1 Watchdog routes
 
-Authenticated by `Authorization: Bearer sk_dev_...`. A revoked key or a disabled device returns `403` with a machine-readable `code`, so the agent can log a clear reason rather than retrying blindly. Every agent response includes the resolved `config` so a device that missed a heartbeat still converges.
+Authenticated by `Authorization: Bearer sk_dev_...`. A revoked key or a disabled device returns `403` with a machine-readable `code`, so the watchdog can log a clear reason rather than retrying blindly. Every watchdog response includes the resolved `config` so a device that missed a heartbeat still converges.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/agent/enroll` | Body: host facts, agent version. Returns `device_id` and config. Idempotent — re-enrolling with the same key returns the same `device_id` and refreshes host facts. |
-| POST | `/agent/heartbeat` | Body: resource sample, agent version, spool depth. Updates `last_seen_at` and `device_resources`. Returns `config` and `tasks` (which transitions them to `running`). |
-| POST | `/agent/inventory` | Body: `collected_at`, `collector_status`, packages. Performs the diff of §6.3. Returns `report_id` and `change_count`. |
-| POST | `/agent/tasks/{task_id}/result` | Body: `status`, `result`, `error`. Rejects a task belonging to another device. |
+| POST | `/watchdog/enroll` | Body: host facts, watchdog version. Returns `device_id` and config. Idempotent — re-enrolling with the same key returns the same `device_id` and refreshes host facts. |
+| POST | `/watchdog/heartbeat` | Body: resource sample, watchdog version, spool depth. Updates `last_seen_at` and `device_resources`. Returns `config` and `tasks` (which transitions them to `running`). |
+| POST | `/watchdog/inventory` | Body: `collected_at`, `collector_status`, packages. Performs the diff of §6.3. Returns `report_id` and `change_count`. |
+| POST | `/watchdog/tasks/{task_id}/result` | Body: `status`, `result`, `error`. Rejects a task belonging to another device. |
 
 ### 7.2 Admin routes
 
@@ -315,7 +315,7 @@ A thin hand-written API client module wraps `requests`, attaches the token, and 
 
 **Device detail** — five sections:
 
-1. Host and OS facts, agent version, enrollment date.
+1. Host and OS facts, watchdog version, enrollment date.
 2. Resources, as of the last heartbeat, with the sample time shown so a stale reading is never mistaken for a current one.
 3. Packages — searchable, filterable by ecosystem, paginated. A banner if the latest report's `collector_status` shows any collector failed, naming which.
 4. Change log — newest first, with type, old and new version, and detection time.
@@ -346,9 +346,9 @@ sentinel/
     pages/
     api_client.py
     tests/
-  agent/
-    sentinel_agent/{cli,config,http,state,spool,resources,tasks,collectors/}.py
-    bin/sentinel-agent
+  watchdog/
+    sentinel_watchdog/{cli,config,http,state,spool,resources,tasks,collectors/}.py
+    bin/sentinel-watchdog
     install.sh
     tests/
   sim/
@@ -356,13 +356,13 @@ sentinel/
   docs/superpowers/specs/
 ```
 
-`server/` and `dashboard/` build **separate images**. The original plan to share one image contradicted the stronger guarantee in section 8 — that the dashboard has no database driver installed — so they were split: the API image carries `psycopg`, the dashboard image carries only `streamlit` and `requests`. `agent/` is copied into the API image (the installer it serves embeds the agent source) but never executed there.
+`server/` and `dashboard/` build **separate images**. The original plan to share one image contradicted the stronger guarantee in section 8 — that the dashboard has no database driver installed — so they were split: the API image carries `psycopg`, the dashboard image carries only `streamlit` and `requests`. `watchdog/` is copied into the API image (the installer it serves embeds the watchdog source) but never executed there.
 
 ### 9.2 Compose
 
 `db` (PostgreSQL 16, named volume, health check), `api` (migrations on start, then uvicorn), `dashboard`, and in the override file `sim-device-1..3` built from `sim/Dockerfile`. Each sim device runs `cron -f` in the foreground as PID 1 — no init system, no privileged flag, no cgroup mounts, which is the practical payoff of the cron runtime model.
 
-The sim image also installs `python3-pip` and `nodejs` so the Python and npm collectors have something real to inventory. That is a property of the test fixture, not of the agent — the agent needs neither `pip` nor `npm` present to run.
+The sim image also installs `python3-pip` and `nodejs` so the Python and npm collectors have something real to inventory. That is a property of the test fixture, not of the watchdog — the watchdog needs neither `pip` nor `npm` present to run.
 
 Environment-specific values live in `.env`: database credentials, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `PUBLIC_API_URL`, `LOG_LEVEL`. `.env.example` documents every variable. Secrets are never committed.
 
@@ -370,7 +370,7 @@ All of §3's operations work unmodified: `docker compose up -d`, `down`, `restar
 
 ### 9.3 TLS
 
-Local development uses plain HTTP over the Compose network. The VPS deployment adds a Caddy service in front of `api` and `dashboard` for automatic TLS, enabled by a Compose profile so local development does not need certificates. The agent refuses a non-HTTPS server URL unless `--insecure` is passed at enrollment, which the sim devices use and which is logged loudly on every beat — making the insecure case visible rather than silent, and keeping §4's HTTPS requirement true in production.
+Local development uses plain HTTP over the Compose network. The VPS deployment adds a Caddy service in front of `api` and `dashboard` for automatic TLS, enabled by a Compose profile so local development does not need certificates. The watchdog refuses a non-HTTPS server URL unless `--insecure` is passed at enrollment, which the sim devices use and which is logged loudly on every beat — making the insecure case visible rather than silent, and keeping §4's HTTPS requirement true in production.
 
 ---
 
@@ -380,9 +380,9 @@ Per §15, automated tests from the start.
 
 **Unit (server)** — the diff engine against hand-built before/after sets, including the out-of-order and superseded cases and two interpreters holding the same package at different versions; name normalization per ecosystem; status derivation at each threshold boundary; key generation, hashing and revocation; config resolution with and without a per-device override.
 
-**Unit (agent)** — every collector parser against captured real command output held as fixtures, injected by putting a stub binary directory first on `PATH` so the collector runs its real code path against known output. Degenerate cases: missing binary, empty output, malformed JSON, a package name containing a space, timeout. Resource parsers against captured `/proc` files, including the first-beat `cpu_percent: null` case. Spool ordering and eviction at the size cap. Lock contention — a second `beat` while the first holds the lock must exit 0 without acting.
+**Unit (watchdog)** — every collector parser against captured real command output held as fixtures, injected by putting a stub binary directory first on `PATH` so the collector runs its real code path against known output. Degenerate cases: missing binary, empty output, malformed JSON, a package name containing a space, timeout. Resource parsers against captured `/proc` files, including the first-beat `cpu_percent: null` case. Spool ordering and eviction at the size cap. Lock contention — a second `beat` while the first holds the lock must exit 0 without acting.
 
-**Integration** — the real agent script against the real API and a real PostgreSQL, asserting the full sequence: enroll, beat, collect, diff produces the expected change rows, and a report delivered while the API is unreachable spools and then flushes on the next beat. These tests are what pin the agent/API contract, since the agent has no shared types with the server.
+**Integration** — the real watchdog script against the real API and a real PostgreSQL, asserting the full sequence: enroll, beat, collect, diff produces the expected change rows, and a report delivered while the API is unreachable spools and then flushes on the next beat. These tests are what pin the watchdog/API contract, since the watchdog has no shared types with the server.
 
 **End-to-end** — `docker compose up`, then `install.sh` runs inside a sim container and the device appears in `GET /devices` as `online` with a non-zero package count within two minutes. A second E2E case installs a package inside the sim container, queues `collect_inventory`, and asserts the change log shows the addition.
 
@@ -394,7 +394,7 @@ Verification is evidence-based: a test run's output, not an assertion that it sh
 
 Recorded so the parent document can be reconciled later.
 
-1. **No systemd service (§4).** The agent is a cron-invoked script, per explicit user direction. Consequences: §4's restart-on-failure behaviour is inherent rather than configured, and logs go to a rotating file rather than journald. A systemd timer remains a drop-in alternative later for machines wanting catch-up after downtime via `Persistent=true`.
+1. **No systemd service (§4).** The watchdog is a cron-invoked script, per explicit user direction. Consequences: §4's restart-on-failure behaviour is inherent rather than configured, and logs go to a rotating file rather than journald. A systemd timer remains a drop-in alternative later for machines wanting catch-up after downtime via `Persistent=true`.
 2. **Debian-family only, not Linux generally (§2).** v1 targets Ubuntu 20.04+ and Debian 11+, because the collectors read `dpkg`. The collector interface keeps other distributions additive.
 3. **No full inventory snapshots (§14).** Current state plus a change log, for the storage reasons in §6.3. The intent of §14 — reconstructing changes over time — is satisfied.
 4. **Spool has no 30-day age policy (§4).** Size cap only in v1; the age policy is a later tightening.
@@ -420,4 +420,4 @@ Items `project_schema.md` §17 left open that this spec now fixes, with values c
 | API key format | `sk_dev_` + 32 random bytes base64url, SHA-256 hashed at rest |
 | Retention | 30 days for changes, reports, tasks and sessions |
 | Root filesystem reporting | `/` is always reported whatever filesystem backs it; the allowlist applies only to other mountpoints |
-| Installer bundle caching | Cached on a fingerprint of the agent source's newest mtime and total size, so edits invalidate it without a restart |
+| Installer bundle caching | Cached on a fingerprint of the watchdog source's newest mtime and total size, so edits invalidate it without a restart |

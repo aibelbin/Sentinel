@@ -1,9 +1,9 @@
-"""Builds the downloadable installer, and the bundle agents update from.
+"""Builds the downloadable installer, and the bundle watchdogs update from.
 
-The script is self-contained: the agent source is embedded as a base64 tar.gz
+The script is self-contained: the watchdog source is embedded as a base64 tar.gz
 so the administrator downloads one file, copies it to the device, and runs it.
 The same bundle bytes are served to already-enrolled machines when they update,
-so an installed agent and an updated one are byte-identical.
+so an installed watchdog and an updated one are byte-identical.
 """
 
 import base64
@@ -13,7 +13,7 @@ import tarfile
 from functools import lru_cache
 from pathlib import Path
 
-BUNDLE_MEMBERS = ("sentinel_agent",)
+BUNDLE_MEMBERS = ("sentinel_watchdog",)
 
 # The stable launcher is installed from the installer and deliberately left out
 # of the update bundle: updates must never replace the one piece that can put a
@@ -44,9 +44,9 @@ def sorted_paths(top: Path) -> list[Path]:
 
 
 def source_fingerprint(root: Path) -> tuple:
-    """Newest mtime and total size across the agent source.
+    """Newest mtime and total size across the watchdog source.
 
-    Used as a cache key so that editing the agent invalidates cached bundles on
+    Used as a cache key so that editing the watchdog invalidates cached bundles on
     its own. In production the source is baked into the image and never
     changes, so this costs one stat sweep per request; in development it is
     what stops a downloaded installer carrying stale code.
@@ -68,7 +68,7 @@ def _pack(root: Path, members: tuple[str, ...]) -> bytes:
     missing = [name for name in members if not (root / name).exists()]
     if missing:
         raise FileNotFoundError(
-            f"agent source incomplete under {root}: missing {', '.join(missing)}"
+            f"watchdog source incomplete under {root}: missing {', '.join(missing)}"
         )
 
     buf = io.BytesIO()
@@ -88,31 +88,31 @@ def _pack(root: Path, members: tuple[str, ...]) -> bytes:
 
 
 @lru_cache(maxsize=4)
-def _bundle_cached(agent_source_dir: str, _fingerprint: tuple) -> bytes:
-    return _pack(Path(agent_source_dir), BUNDLE_MEMBERS)
+def _bundle_cached(watchdog_source_dir: str, _fingerprint: tuple) -> bytes:
+    return _pack(Path(watchdog_source_dir), BUNDLE_MEMBERS)
 
 
 @lru_cache(maxsize=4)
-def _launcher_cached(agent_source_dir: str, _fingerprint: tuple) -> bytes:
-    return _pack(Path(agent_source_dir), LAUNCHER_MEMBERS)
+def _launcher_cached(watchdog_source_dir: str, _fingerprint: tuple) -> bytes:
+    return _pack(Path(watchdog_source_dir), LAUNCHER_MEMBERS)
 
 
-def bundle_bytes(agent_source_dir: str) -> bytes:
-    """The agent code an updating machine downloads. Excludes the launcher."""
-    root = Path(agent_source_dir)
-    return _bundle_cached(agent_source_dir, source_fingerprint(root))
+def bundle_bytes(watchdog_source_dir: str) -> bytes:
+    """The watchdog code an updating machine downloads. Excludes the launcher."""
+    root = Path(watchdog_source_dir)
+    return _bundle_cached(watchdog_source_dir, source_fingerprint(root))
 
 
-def launcher_bytes(agent_source_dir: str) -> bytes:
+def launcher_bytes(watchdog_source_dir: str) -> bytes:
     """The stable launcher, shipped only by the installer."""
-    root = Path(agent_source_dir)
-    return _launcher_cached(agent_source_dir, source_fingerprint(root))
+    root = Path(watchdog_source_dir)
+    return _launcher_cached(watchdog_source_dir, source_fingerprint(root))
 
 
-def _template(agent_source_dir: str) -> str:
+def _template(watchdog_source_dir: str) -> str:
     """Read every time: it is one small file, and a stale installer template is
     exactly the kind of bug that is invisible until a device fails to enroll."""
-    return (Path(agent_source_dir) / "install.sh").read_text(encoding="utf-8")
+    return (Path(watchdog_source_dir) / "install.sh").read_text(encoding="utf-8")
 
 
 def _shell_single_quote(value: str) -> str:
@@ -121,7 +121,7 @@ def _shell_single_quote(value: str) -> str:
 
 
 def build_installer(
-    agent_source_dir: str,
+    watchdog_source_dir: str,
     *,
     version: str,
     server_url: str | None = None,
@@ -133,14 +133,14 @@ def build_installer(
     Omitted credentials leave the script prompting interactively, which is what
     the generic download does.
     """
-    script = _template(agent_source_dir)
+    script = _template(watchdog_source_dir)
     replacements = {
         "@@SERVER_URL@@": _shell_single_quote(server_url or ""),
         "@@API_KEY@@": _shell_single_quote(api_key or ""),
         "@@INSECURE@@": "1" if insecure else "",
-        "@@AGENT_VERSION@@": _shell_single_quote(version),
-        "@@BUNDLE@@": base64.b64encode(bundle_bytes(agent_source_dir)).decode("ascii"),
-        "@@LAUNCHER@@": base64.b64encode(launcher_bytes(agent_source_dir)).decode("ascii"),
+        "@@WATCHDOG_VERSION@@": _shell_single_quote(version),
+        "@@BUNDLE@@": base64.b64encode(bundle_bytes(watchdog_source_dir)).decode("ascii"),
+        "@@LAUNCHER@@": base64.b64encode(launcher_bytes(watchdog_source_dir)).decode("ascii"),
     }
     for token, value in replacements.items():
         if token not in script:

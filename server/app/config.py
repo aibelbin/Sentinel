@@ -36,8 +36,8 @@ class Settings(BaseSettings):
     # inferred from the request.
     public_api_url: str = ""
 
-    # Directory holding the agent source that gets bundled into the installer.
-    agent_source_dir: str = "/app/agent"
+    # Directory holding the watchdog source that gets bundled into the installer.
+    watchdog_source_dir: str = "/app/watchdog"
 
     log_level: str = "INFO"
 
