@@ -1,16 +1,16 @@
-"""Global agent configuration."""
+"""Global watchdog configuration."""
 
 import streamlit as st
 
 from api_client import Api, ApiError
 
 
-def _render_agent_version(api: Api) -> None:
-    st.subheader("Agent version")
+def _render_watchdog_version(api: Api) -> None:
+    st.subheader("Watchdog version")
     try:
-        release = api.get("/agent-release")
+        release = api.get("/watchdog-release")
     except ApiError as exc:
-        st.warning(f"Could not read the agent version: {exc.message}")
+        st.warning(f"Could not read the watchdog version: {exc.message}")
         return
 
     columns = st.columns(3)
@@ -21,14 +21,14 @@ def _render_agent_version(api: Api) -> None:
     columns[2].metric("Status", "Held back" if release["quarantined"] else "Rolling out")
 
     st.caption(
-        "The version is a hash of the agent code on this server, so deploying "
+        "The version is a hash of the watchdog code on this server, so deploying "
         "changes it automatically. Machines pick it up on their next heartbeat."
     )
 
     try:
-        package = api.get_raw("/agent-package")
+        package = api.get_raw("/watchdog-package")
     except ApiError as exc:
-        st.warning(f"Could not build the agent package: {exc.message}")
+        st.warning(f"Could not build the watchdog package: {exc.message}")
     else:
         st.download_button(
             f"⬇️  {release['package_filename']}",
@@ -50,7 +50,7 @@ def _render_agent_version(api: Api) -> None:
         )
         if st.button("Try this version again"):
             try:
-                api.post("/agent-release/clear-quarantine")
+                api.post("/watchdog-release/clear-quarantine")
                 st.success("Cleared. Machines will retry on their next heartbeat.")
                 st.rerun()
             except ApiError as exc:
@@ -61,9 +61,9 @@ def _render_agent_version(api: Api) -> None:
 
 def render(api: Api) -> None:
     st.header("Settings")
-    _render_agent_version(api)
+    _render_watchdog_version(api)
     st.caption(
-        "These are the global defaults delivered to agents on their next "
+        "These are the global defaults delivered to watchdogs on their next "
         "heartbeat. Nothing is pushed to devices; they converge within a minute."
     )
 
@@ -73,7 +73,7 @@ def render(api: Api) -> None:
         st.error(exc.message)
         return
 
-    with st.form("agent_config"):
+    with st.form("watchdog_config"):
         poll = st.number_input(
             "Heartbeat interval (seconds)",
             min_value=30,
@@ -81,7 +81,7 @@ def render(api: Api) -> None:
             value=int(config["poll_interval_seconds"]),
             step=30,
             help=(
-                "How often an agent reports in. Cron ticks every minute, so "
+                "How often a watchdog reports in. Cron ticks every minute, so "
                 "values below 60 do not increase frequency; they only relax "
                 "the online/stale thresholds, which are multiples of this."
             ),
@@ -101,7 +101,7 @@ def render(api: Api) -> None:
             value=max(1, int(config["spool_max_bytes"]) // (1024 * 1024)),
             step=16,
             help=(
-                "Disk an agent may use for reports it could not deliver. "
+                "Disk a watchdog may use for reports it could not deliver. "
                 "At the cap, the oldest reports are dropped first."
             ),
         )
@@ -116,7 +116,7 @@ def render(api: Api) -> None:
                         "spool_max_bytes": int(spool_mb) * 1024 * 1024,
                     },
                 )
-                st.success("Saved. Agents pick this up on their next heartbeat.")
+                st.success("Saved. Watchdogs pick this up on their next heartbeat.")
             except ApiError as exc:
                 st.error(exc.message)
 

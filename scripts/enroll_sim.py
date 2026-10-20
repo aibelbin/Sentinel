@@ -19,7 +19,7 @@ API = os.environ.get("SENTINEL_API", "http://localhost:8000").rstrip("/")
 ADMIN_USER = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me-now")
 
-# The URL the agent uses from inside the Compose network, which is not the one
+# The URL the watchdog uses from inside the Compose network, which is not the one
 # the host uses to reach the API.
 INTERNAL_API = os.environ.get("SENTINEL_INTERNAL_API", "http://api:8000")
 

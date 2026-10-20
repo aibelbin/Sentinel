@@ -1,7 +1,7 @@
-"""The .deb the agent ships as.
+"""The .deb the watchdog ships as.
 
 The point of the package is `Depends: python3, cron` -- apt resolving the
-agent's dependencies instead of a human preparing the machine -- so that is
+watchdog's dependencies instead of a human preparing the machine -- so that is
 what these assert hardest on.
 """
 
@@ -11,7 +11,7 @@ import tarfile
 
 import pytest
 
-from app.services import agent_release, debian_package
+from app.services import watchdog_release, debian_package
 from app.services.installer import clear_caches
 
 pytestmark = pytest.mark.skipif(
@@ -22,21 +22,21 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def _caches():
     debian_package.clear_caches()
-    agent_release.clear_caches()
+    watchdog_release.clear_caches()
     clear_caches()
     yield
     debian_package.clear_caches()
-    agent_release.clear_caches()
+    watchdog_release.clear_caches()
     clear_caches()
 
 
 @pytest.fixture
 def built(tmp_path):
-    """Build the package from the real agent source and unpack it for reading."""
+    """Build the package from the real watchdog source and unpack it for reading."""
     from app.config import get_settings
 
-    source = get_settings().agent_source_dir
-    version, _ = agent_release.current_release()
+    source = get_settings().watchdog_source_dir
+    version, _ = watchdog_release.current_release()
     data = debian_package.build(source, version)
 
     path = tmp_path / debian_package.filename(version)
@@ -82,13 +82,13 @@ def test_it_declares_its_dependencies(built):
     assert "cron" in depends
 
 
-def test_it_requires_a_python_the_agent_actually_runs_on(built):
+def test_it_requires_a_python_the_watchdog_actually_runs_on(built):
     _version, path = built
     assert ">= 3.8" in _field(path, "Depends")
 
 
 def test_it_is_architecture_independent(built):
-    """The agent is pure Python, so one package serves every machine."""
+    """The watchdog is pure Python, so one package serves every machine."""
     _version, path = built
     assert _field(path, "Architecture") == "all"
 
@@ -98,17 +98,17 @@ def test_it_is_architecture_independent(built):
 # --------------------------------------------------------------------------- #
 
 
-def test_it_ships_the_launcher_and_the_agent(built):
+def test_it_ships_the_launcher_and_the_watchdog(built):
     version, path = built
     names = _contents(path)
-    assert "/opt/sentinel-agent/bin/sentinel-agent" in names
-    assert f"/opt/sentinel-agent/live/versions/{version}/sentinel_agent/cli.py" in names
+    assert "/opt/sentinel-watchdog/bin/sentinel-watchdog" in names
+    assert f"/opt/sentinel-watchdog/live/versions/{version}/sentinel_watchdog/cli.py" in names
     assert any(name.endswith("/collectors/os_pkgs.py") for name in names)
 
 
-def test_it_puts_the_agent_on_path(built):
+def test_it_puts_the_watchdog_on_path(built):
     _version, path = built
-    assert "/usr/bin/sentinel-agent" in _contents(path)
+    assert "/usr/bin/sentinel-watchdog" in _contents(path)
 
 
 def test_it_carries_no_compiled_python(built):
@@ -166,14 +166,14 @@ def test_postinst_does_not_try_to_enrol(built, tmp_path):
 
 
 def test_purge_removes_self_installed_versions(built, tmp_path):
-    """Versions the agent installed itself are outside dpkg's file list, so
+    """Versions the watchdog installed itself are outside dpkg's file list, so
     postrm has to remove the tree explicitly or they are left behind."""
     _version, path = built
     control = tmp_path / "control"
     control.mkdir()
     subprocess.run(["dpkg-deb", "--control", str(path), str(control)], check=True)
     postrm = (control / "postrm").read_text()
-    assert "/opt/sentinel-agent" in postrm
+    assert "/opt/sentinel-watchdog" in postrm
     assert "purge" in postrm
 
 
@@ -182,17 +182,17 @@ def test_purge_removes_self_installed_versions(built, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_editing_the_agent_rebuilds_the_package(tmp_path, monkeypatch):
+def test_editing_the_watchdog_rebuilds_the_package(tmp_path, monkeypatch):
     from app.config import get_settings
 
-    source = tmp_path / "agent"
-    (source / "sentinel_agent").mkdir(parents=True)
+    source = tmp_path / "watchdog"
+    (source / "sentinel_watchdog").mkdir(parents=True)
     (source / "bin").mkdir()
-    (source / "sentinel_agent" / "cli.py").write_text("def main(argv=None):\n    return 0\n")
-    (source / "bin" / "sentinel-agent").write_text("#!/usr/bin/env python3\n")
+    (source / "sentinel_watchdog" / "cli.py").write_text("def main(argv=None):\n    return 0\n")
+    (source / "bin" / "sentinel-watchdog").write_text("#!/usr/bin/env python3\n")
 
     first = debian_package.build(str(source), "aaaaaaaaaaaa")
-    (source / "sentinel_agent" / "extra.py").write_text("# a new feature\n")
+    (source / "sentinel_watchdog" / "extra.py").write_text("# a new feature\n")
     second = debian_package.build(str(source), "bbbbbbbbbbbb")
 
     assert first != second

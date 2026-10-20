@@ -55,7 +55,7 @@ def render_confirmation(api: Api, *, package_count: int | None = None) -> bool:
         st.markdown(
             "This permanently removes:\n"
             + "\n".join(f"- {item}" for item in losses)
-            + "\n\nThere is no undo. The agent on that machine keeps running and "
+            + "\n\nThere is no undo. The watchdog on that machine keeps running and "
             "will be refused with `invalid_or_revoked_key` on every beat until "
             "it is uninstalled with `sudo ./sentinel-install.sh --uninstall`."
         )

@@ -1,15 +1,15 @@
 # A simulated managed device: plain Ubuntu with cron.
 #
-# No init system and no privileged flag needed, because the agent is a cron
+# No init system and no privileged flag needed, because the watchdog is a cron
 # entry rather than a systemd service. This is the practical payoff of that
 # design decision.
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# python3 is what the agent needs. pip and nodejs are here only so the Python
+# python3 is what the watchdog needs. pip and nodejs are here only so the Python
 # and npm collectors have something real to inventory -- they are properties of
-# this test fixture, not dependencies of the agent.
+# this test fixture, not dependencies of the watchdog.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         cron \

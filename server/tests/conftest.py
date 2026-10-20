@@ -119,12 +119,12 @@ def _clean_tables(_database):
                 "admin_user RESTART IDENTITY CASCADE"
             )
         )
-        # agent_config is not truncated: its global row (id 1) is seeded by the
+        # watchdog_config is not truncated: its global row (id 1) is seeded by the
         # migration and every config resolution depends on it.
         conn.execute(
             text(
-                "DELETE FROM agent_config WHERE device_id IS NOT NULL; "
-                "UPDATE agent_config SET poll_interval_seconds = 60, "
+                "DELETE FROM watchdog_config WHERE device_id IS NOT NULL; "
+                "UPDATE watchdog_config SET poll_interval_seconds = 60, "
                 "inventory_interval_seconds = 43200, spool_max_bytes = 67108864 "
                 "WHERE id = 1"
             )

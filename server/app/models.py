@@ -82,7 +82,7 @@ class Device(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     last_seen_at: Mapped[datetime | None] = _ts(nullable=True)
-    agent_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    watchdog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Host facts are metadata, never identity. Devices are never matched on them.
     hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -94,9 +94,9 @@ class Device(Base):
     cpu_cores: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_memory_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
-    # How this machine's last agent update went. Reported by the agent, because
+    # How this machine's last watchdog update went. Reported by the watchdog, because
     # a machine reverting itself is something only the machine knows.
-    previous_agent_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    previous_watchdog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_update_at: Mapped[datetime | None] = _ts(nullable=True)
     last_update_result: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_update_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -270,14 +270,14 @@ class Task(Base):
     error: Mapped[str | None] = mapped_column(String(2000), nullable=True)
 
 
-class AgentConfig(Base):
+class WatchdogConfig(Base):
     """Row with device_id NULL (id = 1) is the global default; rows with a
     device_id are per-device overrides."""
 
-    __tablename__ = "agent_config"
+    __tablename__ = "watchdog_config"
     __table_args__ = (
         Index(
-            "uq_agent_config_device",
+            "uq_watchdog_config_device",
             "device_id",
             unique=True,
             postgresql_where=text("device_id IS NOT NULL"),
@@ -305,14 +305,14 @@ class AgentConfig(Base):
     updated_at: Mapped[datetime] = _ts(server_default=func.now(), nullable=False)
 
 
-class AgentRelease(Base):
-    """One row per agent version the server has served.
+class WatchdogRelease(Base):
+    """One row per watchdog version the server has served.
 
-    The version is a hash of the agent source, so rows accumulate as the code
+    The version is a hash of the watchdog source, so rows accumulate as the code
     changes and a quarantine naturally applies to exactly one build.
     """
 
-    __tablename__ = "agent_release"
+    __tablename__ = "watchdog_release"
 
     version: Mapped[str] = mapped_column(String(64), primary_key=True)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)

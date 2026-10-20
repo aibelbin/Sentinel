@@ -29,7 +29,7 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me-now}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      AGENT_SOURCE_DIR: /app/agent
+      WATCHDOG_SOURCE_DIR: /app/watchdog
       # So the CLI can bake the right address into installers it generates.
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
     healthcheck:

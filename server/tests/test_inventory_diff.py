@@ -26,7 +26,7 @@ def device(db):
 def report(packages, collected_at=T0):
     return InventoryRequest(
         collected_at=collected_at,
-        agent_version="1.0.0",
+        watchdog_version="1.0.0",
         collector_status={"os": "ok: 1"},
         packages=packages,
     )

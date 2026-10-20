@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_RETRIES=5
 
 # cron runs the nightly prune; tini reaps the children it spawns. dpkg-dev
-# provides dpkg-deb, which builds the agent's .deb on demand.
+# provides dpkg-deb, which builds the watchdog's .deb on demand.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cron tini dpkg-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -19,9 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server/ ./
 
-# The agent source is embedded into the installer this API serves, so it has to
+# The watchdog source is embedded into the installer this API serves, so it has to
 # be present in the image. It is never executed here.
-COPY agent/ /app/agent/
+COPY watchdog/ /app/watchdog/
 # Maintainer scripts and the control template for the .deb.
 COPY packaging/ /app/packaging/
 

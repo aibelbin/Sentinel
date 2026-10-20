@@ -7,7 +7,7 @@ set -e
 
 case "$1" in
     remove|upgrade|deconfigure)
-        rm -f /etc/cron.d/sentinel-agent
+        rm -f /etc/cron.d/sentinel-watchdog
         ;;
     failed-upgrade) ;;
 esac

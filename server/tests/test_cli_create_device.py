@@ -9,16 +9,16 @@ from sqlalchemy import select
 
 from app.cli import main
 from app.models import Device, DeviceKey
-from app.services import agent_release
+from app.services import watchdog_release
 from app.services.installer import clear_caches
 
 
 @pytest.fixture(autouse=True)
 def _caches():
-    agent_release.clear_caches()
+    watchdog_release.clear_caches()
     clear_caches()
     yield
-    agent_release.clear_caches()
+    watchdog_release.clear_caches()
     clear_caches()
 
 
@@ -54,7 +54,7 @@ def test_creates_a_device_and_writes_an_installer(db, https_url, tmp_path, capsy
     script = (tmp_path / "install.sh").read_text()
     assert "SERVER_URL='https://sentinel.example'" in script
     assert re.search(r"API_KEY='sk_dev_[A-Za-z0-9_-]+'", script)
-    assert "AGENT_BUNDLE_B64='" in script
+    assert "WATCHDOG_BUNDLE_B64='" in script
 
     out = capsys.readouterr().out
     assert "created web-01" in out
@@ -76,8 +76,8 @@ def test_the_key_works_against_the_api(client, db, https_url, tmp_path, capsys):
     key = re.search(r"api key\s*:\s*(sk_dev_[A-Za-z0-9_-]+)", capsys.readouterr().out).group(1)
 
     response = client.post(
-        "/api/v1/agent/enroll",
-        json={"agent_version": "abcdef012345", "host": {"hostname": "web-01"}},
+        "/api/v1/watchdog/enroll",
+        json={"watchdog_version": "abcdef012345", "host": {"hostname": "web-01"}},
         headers={"Authorization": f"Bearer {key}"},
     )
     assert response.status_code == 200
@@ -193,12 +193,12 @@ def test_rotate_issues_a_new_key_and_revokes_the_old(client, db, https_url, tmp_
     assert second != first
     assert "rotated key for web-01" in out
 
-    beat = {"agent_version": "abcdef012345"}
+    beat = {"watchdog_version": "abcdef012345"}
     assert client.post(
-        "/api/v1/agent/heartbeat", json=beat, headers={"Authorization": f"Bearer {first}"}
+        "/api/v1/watchdog/heartbeat", json=beat, headers={"Authorization": f"Bearer {first}"}
     ).status_code == 403
     assert client.post(
-        "/api/v1/agent/heartbeat", json=beat, headers={"Authorization": f"Bearer {second}"}
+        "/api/v1/watchdog/heartbeat", json=beat, headers={"Authorization": f"Bearer {second}"}
     ).status_code == 200
 
 

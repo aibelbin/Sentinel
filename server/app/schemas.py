@@ -2,11 +2,11 @@ from datetime import datetime
 from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 T = TypeVar("T")
 
-AGENT_VERSION_MAX = 64
+WATCHDOG_VERSION_MAX = 64
 MAX_PACKAGES_PER_REPORT = 20000
 
 
@@ -31,7 +31,7 @@ class LoginResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-class AgentConfigOut(BaseModel):
+class WatchdogConfigOut(BaseModel):
     poll_interval_seconds: int
     inventory_interval_seconds: int
     spool_max_bytes: int
@@ -63,21 +63,25 @@ class HostFacts(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Agent routes
+# Watchdog routes
 # --------------------------------------------------------------------------- #
 
 
 class EnrollRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    agent_version: str = Field(max_length=AGENT_VERSION_MAX)
+    watchdog_version: str = Field(
+        max_length=WATCHDOG_VERSION_MAX,
+        # Devices that predate the rename still send `agent_version`.
+        validation_alias=AliasChoices("watchdog_version", "agent_version"),
+    )
     host: HostFacts
 
 
 class EnrollResponse(BaseModel):
     device_id: UUID
     name: str
-    config: AgentConfigOut
+    config: WatchdogConfigOut
 
 
 class ResourceSample(BaseModel):
@@ -96,7 +100,7 @@ class ResourceSample(BaseModel):
 
 
 class UpdateReport(BaseModel):
-    """How the machine's last agent update went.
+    """How the machine's last watchdog update went.
 
     A revert is only observable from here: the server handed out a version, the
     machine tried it and went back, and nothing else would tell it so.
@@ -113,7 +117,11 @@ class UpdateReport(BaseModel):
 class HeartbeatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    agent_version: str = Field(max_length=AGENT_VERSION_MAX)
+    watchdog_version: str = Field(
+        max_length=WATCHDOG_VERSION_MAX,
+        # Devices that predate the rename still send `agent_version`.
+        validation_alias=AliasChoices("watchdog_version", "agent_version"),
+    )
     spool_depth: int = Field(default=0, ge=0)
     resources: ResourceSample = Field(default_factory=ResourceSample)
     host: HostFacts | None = None
@@ -127,7 +135,7 @@ class TaskOut(BaseModel):
 
 
 class HeartbeatResponse(BaseModel):
-    config: AgentConfigOut
+    config: WatchdogConfigOut
     tasks: list[TaskOut]
     server_time: datetime
 
@@ -146,7 +154,11 @@ class InventoryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collected_at: datetime
-    agent_version: str = Field(max_length=AGENT_VERSION_MAX)
+    watchdog_version: str = Field(
+        max_length=WATCHDOG_VERSION_MAX,
+        # Devices that predate the rename still send `agent_version`.
+        validation_alias=AliasChoices("watchdog_version", "agent_version"),
+    )
     collector_status: dict[str, str] = Field(default_factory=dict)
     packages: list[PackageIn] = Field(max_length=MAX_PACKAGES_PER_REPORT)
     host: HostFacts | None = None
@@ -220,8 +232,8 @@ class ResourcesOut(BaseModel):
     disks: list[Disk]
 
 
-class AgentBundle(BaseModel):
-    """The agent code an updating machine downloads."""
+class WatchdogBundle(BaseModel):
+    """The watchdog code an updating machine downloads."""
 
     version: str
     sha256: str
@@ -248,7 +260,7 @@ class DeviceSummary(BaseModel):
     enabled: bool
     created_at: datetime
     last_seen_at: datetime | None
-    agent_version: str | None
+    watchdog_version: str | None
     hostname: str | None
     os_name: str | None
     os_version: str | None
@@ -263,14 +275,14 @@ class DeviceDetail(DeviceSummary):
     cpu_model: str | None
     cpu_cores: int | None
     total_memory_bytes: int | None
-    config: AgentConfigOut
+    config: WatchdogConfigOut
     last_report_at: datetime | None
     last_collector_status: dict[str, str]
-    previous_agent_version: str | None
+    previous_watchdog_version: str | None
     last_update_at: datetime | None
     last_update_result: str | None
     last_update_detail: str | None
-    target_agent_version: str | None
+    target_watchdog_version: str | None
 
 
 class PackageOut(BaseModel):

@@ -10,9 +10,9 @@ services:
     # --reload in development only; the base file runs uvicorn plain.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     volumes:
-      # Live-reload the agent source so a collector change is picked up by the
+      # Live-reload the watchdog source so a collector change is picked up by the
       # next installer download without rebuilding the image.
-      - ./agent:/app/agent:ro
+      - ./watchdog:/app/watchdog:ro
       # Server code and tests are mounted too, so editing either does not need
       # an image rebuild. Without this, a test edit is silently not picked up
       # and you end up debugging the previous build.
@@ -33,7 +33,7 @@ services:
       api:
         condition: service_healthy
     volumes:
-      - ./agent:/opt/sentinel-src:ro
+      - ./watchdog:/opt/sentinel-src:ro
 
   sim-device-2:
     build:
@@ -44,4 +44,4 @@ services:
       api:
         condition: service_healthy
     volumes:
-      - ./agent:/opt/sentinel-src:ro
+      - ./watchdog:/opt/sentinel-src:ro

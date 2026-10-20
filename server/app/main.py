@@ -18,7 +18,7 @@ app = FastAPI(
     title="Sentinel",
     version="1.0.0",
     description=(
-        "Device inventory and management platform. Agent routes authenticate "
+        "Device inventory and management platform. Watchdog routes authenticate "
         "with a per-device API key; admin routes with a session bearer token."
     ),
 )

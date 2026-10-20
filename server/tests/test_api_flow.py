@@ -66,8 +66,8 @@ def test_a_device_key_cannot_be_used_as_an_admin_token(client, device_key):
 
 def test_an_admin_token_cannot_be_used_as_a_device_key(client, admin_token):
     response = client.post(
-        "/api/v1/agent/heartbeat",
-        json={"agent_version": "1.0.0"},
+        "/api/v1/watchdog/heartbeat",
+        json={"watchdog_version": "1.0.0"},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 403
@@ -105,16 +105,16 @@ def test_rotate_key_revokes_the_old_one(client, auth, device_key):
     assert new_key != old_key
 
     old = client.post(
-        "/api/v1/agent/heartbeat",
-        json={"agent_version": "1.0.0"},
+        "/api/v1/watchdog/heartbeat",
+        json={"watchdog_version": "1.0.0"},
         headers={"Authorization": f"Bearer {old_key}"},
     )
     assert old.status_code == 403
     assert old.json()["detail"]["code"] == "invalid_or_revoked_key"
 
     new = client.post(
-        "/api/v1/agent/heartbeat",
-        json={"agent_version": "1.0.0"},
+        "/api/v1/watchdog/heartbeat",
+        json={"watchdog_version": "1.0.0"},
         headers={"Authorization": f"Bearer {new_key}"},
     )
     assert new.status_code == 200
@@ -125,7 +125,7 @@ def test_disabled_device_is_refused_with_a_distinct_code(client, auth, device_ke
     client.patch(f"/api/v1/devices/{device_id}", json={"enabled": False}, headers=auth)
 
     response = client.post(
-        "/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth
+        "/api/v1/watchdog/heartbeat", json={"watchdog_version": "1.0.0"}, headers=device_auth
     )
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "device_disabled"
@@ -133,7 +133,7 @@ def test_disabled_device_is_refused_with_a_distinct_code(client, auth, device_ke
 
 def test_disabled_device_reports_disabled_status(client, auth, device_key, device_auth):
     device_id, _ = device_key
-    client.post("/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth)
+    client.post("/api/v1/watchdog/heartbeat", json={"watchdog_version": "1.0.0"}, headers=device_auth)
     client.patch(f"/api/v1/devices/{device_id}", json={"enabled": False}, headers=auth)
 
     detail = client.get(f"/api/v1/devices/{device_id}", headers=auth).json()
@@ -141,14 +141,14 @@ def test_disabled_device_reports_disabled_status(client, auth, device_key, devic
 
 
 # --------------------------------------------------------------------------- #
-# Agent lifecycle
+# Watchdog lifecycle
 # --------------------------------------------------------------------------- #
 
 
 def test_enroll_returns_identity_and_config(client, device_auth):
     response = client.post(
-        "/api/v1/agent/enroll",
-        json={"agent_version": "1.0.0", "host": HOST},
+        "/api/v1/watchdog/enroll",
+        json={"watchdog_version": "1.0.0", "host": HOST},
         headers=device_auth,
     )
     assert response.status_code == 200
@@ -160,10 +160,10 @@ def test_enroll_returns_identity_and_config(client, device_auth):
 
 def test_enroll_is_idempotent(client, device_auth):
     first = client.post(
-        "/api/v1/agent/enroll", json={"agent_version": "1.0.0", "host": HOST}, headers=device_auth
+        "/api/v1/watchdog/enroll", json={"watchdog_version": "1.0.0", "host": HOST}, headers=device_auth
     ).json()
     second = client.post(
-        "/api/v1/agent/enroll", json={"agent_version": "1.0.1", "host": HOST}, headers=device_auth
+        "/api/v1/watchdog/enroll", json={"watchdog_version": "1.0.1", "host": HOST}, headers=device_auth
     ).json()
     assert first["device_id"] == second["device_id"]
 
@@ -171,8 +171,8 @@ def test_enroll_is_idempotent(client, device_auth):
 def test_heartbeat_records_resources_and_goes_online(client, auth, device_key, device_auth):
     device_id, _ = device_key
     response = client.post(
-        "/api/v1/agent/heartbeat",
-        json={"agent_version": "1.0.0", "resources": RESOURCES, "host": HOST},
+        "/api/v1/watchdog/heartbeat",
+        json={"watchdog_version": "1.0.0", "resources": RESOURCES, "host": HOST},
         headers=device_auth,
     )
     assert response.status_code == 200
@@ -185,12 +185,12 @@ def test_heartbeat_records_resources_and_goes_online(client, auth, device_key, d
 
 
 def test_first_beat_may_report_unknown_cpu(client, auth, device_key, device_auth):
-    """The agent has no prior /proc/stat sample on its first run, and null must
+    """The watchdog has no prior /proc/stat sample on its first run, and null must
     survive the round trip rather than becoming 0."""
     device_id, _ = device_key
     client.post(
-        "/api/v1/agent/heartbeat",
-        json={"agent_version": "1.0.0", "resources": {**RESOURCES, "cpu_percent": None}},
+        "/api/v1/watchdog/heartbeat",
+        json={"watchdog_version": "1.0.0", "resources": {**RESOURCES, "cpu_percent": None}},
         headers=device_auth,
     )
     detail = client.get(f"/api/v1/devices/{device_id}", headers=auth).json()
@@ -200,10 +200,10 @@ def test_first_beat_may_report_unknown_cpu(client, auth, device_key, device_auth
 def test_inventory_round_trip(client, auth, device_key, device_auth):
     device_id, _ = device_key
     response = client.post(
-        "/api/v1/agent/inventory",
+        "/api/v1/watchdog/inventory",
         json={
             "collected_at": now_iso(),
-            "agent_version": "1.0.0",
+            "watchdog_version": "1.0.0",
             "collector_status": {"os": "ok: 2", "npm": "skipped: npm is not installed"},
             "packages": [
                 {"ecosystem": "os", "name": "nginx", "version": "1.24.0"},
@@ -228,10 +228,10 @@ def test_inventory_round_trip(client, auth, device_key, device_auth):
 def test_package_filters(client, auth, device_key, device_auth):
     device_id, _ = device_key
     client.post(
-        "/api/v1/agent/inventory",
+        "/api/v1/watchdog/inventory",
         json={
             "collected_at": now_iso(),
-            "agent_version": "1.0.0",
+            "watchdog_version": "1.0.0",
             "packages": [
                 {"ecosystem": "os", "name": "nginx", "version": "1.24.0"},
                 {"ecosystem": "python", "name": "requests", "version": "2.31.0"},
@@ -258,10 +258,10 @@ def test_package_filters(client, auth, device_key, device_auth):
 
 def test_oversized_report_is_rejected(client, device_auth):
     response = client.post(
-        "/api/v1/agent/inventory",
+        "/api/v1/watchdog/inventory",
         json={
             "collected_at": now_iso(),
-            "agent_version": "1.0.0",
+            "watchdog_version": "1.0.0",
             "packages": [
                 {"ecosystem": "os", "name": f"pkg-{index}", "version": "1.0"}
                 for index in range(20001)
@@ -275,8 +275,8 @@ def test_oversized_report_is_rejected(client, device_auth):
 def test_unknown_fields_are_rejected(client, device_auth):
     """extra="forbid" means a protocol drift is a loud error, not silence."""
     response = client.post(
-        "/api/v1/agent/heartbeat",
-        json={"agent_version": "1.0.0", "unexpected_field": True},
+        "/api/v1/watchdog/heartbeat",
+        json={"watchdog_version": "1.0.0", "unexpected_field": True},
         headers=device_auth,
     )
     assert response.status_code == 422
@@ -294,9 +294,9 @@ def test_task_is_delivered_once_then_marked_running(client, auth, device_key, de
     )
 
     first = client.post(
-        "/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth
+        "/api/v1/watchdog/heartbeat", json={"watchdog_version": "1.0.0"}, headers=device_auth
     ).json()
-    # The heartbeat may also carry an agent update, since this device reports a
+    # The heartbeat may also carry a watchdog update, since this device reports a
     # version the server is not serving; this test is about the queued job.
     collects = [t for t in first["tasks"] if t["type"] == "collect_inventory"]
     assert len(collects) == 1
@@ -304,17 +304,17 @@ def test_task_is_delivered_once_then_marked_running(client, auth, device_key, de
 
     # Claimed on delivery, so the next beat does not run it again.
     second = client.post(
-        "/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth
+        "/api/v1/watchdog/heartbeat", json={"watchdog_version": "1.0.0"}, headers=device_auth
     ).json()
     assert [t for t in second["tasks"] if t["type"] == "collect_inventory"] == []
 
     client.post(
-        f"/api/v1/agent/tasks/{task_id}/result",
+        f"/api/v1/watchdog/tasks/{task_id}/result",
         json={"status": "completed", "result": {"package_count": 42}},
         headers=device_auth,
     )
     tasks = client.get(f"/api/v1/devices/{device_id}/tasks", headers=auth).json()
-    # Listed newest first, and a heartbeat may have queued an agent update
+    # Listed newest first, and a heartbeat may have queued a watchdog update
     # after this one, so find it by id rather than by position.
     reported = next(item for item in tasks["items"] if item["id"] == task_id)
     assert reported["status"] == "completed"
@@ -330,7 +330,7 @@ def test_a_device_cannot_post_a_result_for_another_devices_task(client, auth, de
     ).json()
 
     response = client.post(
-        f"/api/v1/agent/tasks/{queued['id']}/result",
+        f"/api/v1/watchdog/tasks/{queued['id']}/result",
         json={"status": "completed", "result": {}},
         headers={"Authorization": f"Bearer {other['api_key']}"},
     )
@@ -362,7 +362,7 @@ def test_abandoned_task_is_flagged(client, auth, device_key, device_auth, db):
     client.post(
         f"/api/v1/devices/{device_id}/tasks", json={"type": "collect_inventory"}, headers=auth
     )
-    client.post("/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth)
+    client.post("/api/v1/watchdog/heartbeat", json={"watchdog_version": "1.0.0"}, headers=device_auth)
 
     task = db.query(Task).filter(Task.type == "collect_inventory").one()
     task.claimed_at = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -378,7 +378,7 @@ def test_abandoned_task_is_flagged(client, auth, device_key, device_auth, db):
 # --------------------------------------------------------------------------- #
 
 
-def test_config_update_reaches_the_agent(client, auth, device_auth):
+def test_config_update_reaches_the_watchdog(client, auth, device_auth):
     client.put(
         "/api/v1/config",
         json={
@@ -389,7 +389,7 @@ def test_config_update_reaches_the_agent(client, auth, device_auth):
         headers=auth,
     )
     beat = client.post(
-        "/api/v1/agent/heartbeat", json={"agent_version": "1.0.0"}, headers=device_auth
+        "/api/v1/watchdog/heartbeat", json={"watchdog_version": "1.0.0"}, headers=device_auth
     ).json()
     assert beat["config"]["poll_interval_seconds"] == 120
     assert beat["config"]["inventory_interval_seconds"] == 21600
@@ -435,12 +435,12 @@ def test_prefilled_installer_embeds_the_credentials(client, auth, device_key):
     assert "attachment" in response.headers["content-disposition"]
 
 
-def test_installer_bundle_unpacks_to_a_working_agent(client, auth, tmp_path):
-    """The downloaded script must actually carry the agent, not just claim to.
+def test_installer_bundle_unpacks_to_a_working_watchdog(client, auth, tmp_path):
+    """The downloaded script must actually carry the watchdog, not just claim to.
 
-    The agent code and the launcher travel as separate blobs: the launcher is
+    The watchdog code and the launcher travel as separate blobs: the launcher is
     installed once and updates never replace it, so it is deliberately absent
-    from the bundle agents download later.
+    from the bundle watchdogs download later.
     """
     import base64
     import io
@@ -456,14 +456,14 @@ def test_installer_bundle_unpacks_to_a_working_agent(client, auth, tmp_path):
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
             return tar.getnames()
 
-    agent_names = members("AGENT_BUNDLE_B64")
+    watchdog_names = members("WATCHDOG_BUNDLE_B64")
     launcher_names = members("LAUNCHER_B64")
 
-    assert "sentinel_agent/cli.py" in agent_names
-    assert "sentinel_agent/collectors/os_pkgs.py" in agent_names
-    assert not any(name.startswith("bin") for name in agent_names)
-    assert "bin/sentinel-agent" in launcher_names
-    assert not any(name.endswith(".pyc") for name in agent_names + launcher_names)
+    assert "sentinel_watchdog/cli.py" in watchdog_names
+    assert "sentinel_watchdog/collectors/os_pkgs.py" in watchdog_names
+    assert not any(name.startswith("bin") for name in watchdog_names)
+    assert "bin/sentinel-watchdog" in launcher_names
+    assert not any(name.endswith(".pyc") for name in watchdog_names + launcher_names)
 
 
 # --------------------------------------------------------------------------- #
@@ -474,10 +474,10 @@ def test_installer_bundle_unpacks_to_a_working_agent(client, auth, tmp_path):
 def test_deleting_a_device_removes_its_data(client, auth, device_key, device_auth):
     device_id, api_key = device_key
     client.post(
-        "/api/v1/agent/inventory",
+        "/api/v1/watchdog/inventory",
         json={
             "collected_at": now_iso(),
-            "agent_version": "1.0.0",
+            "watchdog_version": "1.0.0",
             "packages": [{"ecosystem": "os", "name": "nginx", "version": "1.24.0"}],
         },
         headers=device_auth,
@@ -488,8 +488,8 @@ def test_deleting_a_device_removes_its_data(client, auth, device_key, device_aut
 
     # Its key must stop working too, or a deleted device could still report.
     response = client.post(
-        "/api/v1/agent/heartbeat",
-        json={"agent_version": "1.0.0"},
+        "/api/v1/watchdog/heartbeat",
+        json={"watchdog_version": "1.0.0"},
         headers={"Authorization": f"Bearer {api_key}"},
     )
     assert response.status_code == 403

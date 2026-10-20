@@ -1,4 +1,4 @@
-"""Serves the ways an agent can be installed: a .deb, and a self-contained
+"""Serves the ways a watchdog can be installed: a .deb, and a self-contained
 script for machines that cannot use apt."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -7,7 +7,7 @@ from fastapi.responses import PlainTextResponse, Response
 from app.config import get_settings
 from app.deps import current_admin
 from app.schemas import InstallerRequest
-from app.services import agent_release, debian_package
+from app.services import watchdog_release, debian_package
 from app.services.installer import build_installer
 
 router = APIRouter(tags=["installer"], dependencies=[Depends(current_admin)])
@@ -16,10 +16,10 @@ _MEDIA_TYPE = "text/x-shellscript; charset=utf-8"
 
 
 def _render(body: InstallerRequest) -> str:
-    version, _sha256 = agent_release.current_release()
+    version, _sha256 = watchdog_release.current_release()
     try:
         return build_installer(
-            get_settings().agent_source_dir,
+            get_settings().watchdog_source_dir,
             version=version,
             server_url=body.server_url,
             api_key=body.api_key,
@@ -33,17 +33,17 @@ def _render(body: InstallerRequest) -> str:
         ) from exc
 
 
-@router.get("/agent-package")
-def get_agent_package() -> Response:
+@router.get("/watchdog-package")
+def get_watchdog_package() -> Response:
     """The .deb, which is the normal way to install.
 
     apt resolves python3 and cron from it, so the target machine needs no
     preparation. It carries no credentials -- the package is identical for
     every machine -- so enrolment is a separate step afterwards.
     """
-    version, _sha256 = agent_release.current_release()
+    version, _sha256 = watchdog_release.current_release()
     try:
-        data = debian_package.build(get_settings().agent_source_dir, version)
+        data = debian_package.build(get_settings().watchdog_source_dir, version)
     except (debian_package.PackageBuildFailed, FileNotFoundError, OSError) as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -55,7 +55,7 @@ def get_agent_package() -> Response:
         media_type="application/vnd.debian.binary-package",
         headers={
             "Content-Disposition": f'attachment; filename="{debian_package.filename(version)}"',
-            "X-Agent-Version": version,
+            "X-Watchdog-Version": version,
         },
     )
 
