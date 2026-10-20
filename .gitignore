@@ -13,3 +13,4 @@ sentinel-install-*.sh
 
 # Local planning docs.
 docs/superpowers/
+liva/.venv/

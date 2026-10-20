@@ -24,6 +24,11 @@ services:
     volumes:
       - ./dashboard:/app
 
+  liva:
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8100", "--reload"]
+    volumes:
+      - ./liva:/app
+
   sim-device-1:
     build:
       context: .

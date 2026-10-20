@@ -52,11 +52,32 @@ services:
       API_URL: http://api:8000
       # What a managed device should be pointed at. Override this for the VPS.
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      # Liva is optional: nothing waits for it, and the dashboard shows a
+      # notice instead of failing if it is down.
+      LIVA_URL: http://liva:8100
     ports:
       # Bound to loopback, not 0.0.0.0. The dashboard is reached through a
       # reverse proxy or a Tailscale funnel, so publishing it on every
       # interface would expose it directly with no TLS in front.
       - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"
 
+  # The chat assistant. Isolated on purpose: it reaches Sentinel only through
+  # the API with the administrator's own token, owns its own SQLite volume, and
+  # publishes no port. No other service depends on it, so if it fails, nothing
+  # else does.
+  liva:
+    build:
+      context: .
+      dockerfile: liva/Dockerfile
+    restart: unless-stopped
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LIVA_MODEL: ${LIVA_MODEL:-llama-3.3-70b-versatile}
+      SENTINEL_URL: http://api:8000
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    volumes:
+      - liva_data:/data
+
 volumes:
   db_data:
+  liva_data:

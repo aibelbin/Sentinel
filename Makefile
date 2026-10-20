@@ -1,4 +1,4 @@
-.PHONY: help up down restart build logs ps test test-server test-watchdog test-dashboard create-device devices sim-enroll sim-collect sim-beat sim-list prune psql shell-api shell-dash clean
+.PHONY: help up down restart build logs ps test test-server test-watchdog test-dashboard test-liva create-device devices sim-enroll sim-collect sim-beat sim-list prune psql shell-api shell-dash shell-liva clean
 
 COMPOSE := docker compose
 
@@ -27,7 +27,7 @@ logs: ## Follow logs
 ps: ## Show service status
 	$(COMPOSE) ps
 
-test: test-server test-watchdog test-dashboard ## Run every test suite
+test: test-server test-watchdog test-dashboard test-liva ## Run every test suite
 
 test-server: ## Run server tests against a scratch database
 	$(COMPOSE) exec -T api sh -lc 'pip install -q -r requirements-dev.txt && python -m pytest tests -q'
@@ -37,6 +37,9 @@ test-watchdog: ## Run watchdog tests
 
 test-dashboard: ## Run dashboard tests
 	$(COMPOSE) exec -T dashboard sh -lc 'pip install -q pytest && cd /app && python -m pytest tests -q'
+
+test-liva: ## Run Liva tests
+	$(COMPOSE) exec -T -u root liva sh -lc 'pip install -q -r requirements-dev.txt && python -m pytest tests -q'
 
 sim-enroll: ## Create devices for the sim containers and install the watchdog in them
 	python3 scripts/enroll_sim.py
@@ -80,6 +83,9 @@ shell-api: ## Shell in the API container
 
 shell-dash: ## Shell in the dashboard container
 	$(COMPOSE) exec dashboard bash
+
+shell-liva: ## Shell in the Liva container
+	$(COMPOSE) exec liva bash
 
 clean: ## Stop the stack and DELETE the database volume
 	$(COMPOSE) down -v
