@@ -77,6 +77,26 @@ Either way the device appears within a minute.
 `PUBLIC_API_URL` in `.env` is the address baked into downloaded installers, so
 it has to be reachable **from the devices** — not `localhost`, once you deploy.
 
+## Liva, the assistant
+
+The **Liva** tab is a chat assistant that can do what the UI does: ask about
+any device, its packages, changes and task history, create a device (she shows
+the key, the `.deb` and the enroll commands), rotate keys, edit the config. It
+runs as its own container (`liva`) on Groq (`GROQ_API_KEY` in `.env`, free at
+console.groq.com) and reaches Sentinel only through the API with your own
+session, so it can do nothing you cannot.
+
+- Reads and harmless writes run on their own. Deleting a device, rotating a
+  key, changing config and clearing quarantine wait for an **Approve** click.
+- The **Bypass approvals** toggle turns those prompts off for the current
+  session, with a red banner while it is on.
+- Device keys are shown to you on screen and never sent to Groq or stored.
+- Chats and an audit log of every tool call are kept for 30 days in Liva's own
+  SQLite volume. If Liva is down or unconfigured, the rest of the dashboard
+  works as usual.
+
+The tools are a real MCP server inside the `liva` container (localhost only).
+
 ## Updating watchdogs
 
 Watchdogs update themselves. Edit the watchdog code, deploy, and machines pick up the
