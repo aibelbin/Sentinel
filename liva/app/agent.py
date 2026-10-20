@@ -37,6 +37,10 @@ SYSTEM_PROMPT = (
     "- Be concise."
 )
 
+# Tool results older than the latest question are shortened in the request to
+# the model, so a long chat cannot outgrow Groq's context or rate limits.
+OLD_TOOL_RESULT_CHARS = 1000
+
 NUDGE = (
     "Your last tool call was malformed. Call the tool again with valid JSON arguments that "
     "match its schema."
@@ -123,6 +127,17 @@ def unresolved_calls(history: list[dict]) -> list[dict]:
     return []
 
 
+def for_model(history: list[dict]) -> list[dict]:
+    last_user = max((i for i, m in enumerate(history) if m["role"] == "user"), default=-1)
+    out = []
+    for index, message in enumerate(history):
+        content = message.get("content") or ""
+        if message["role"] == "tool" and index < last_user and len(content) > OLD_TOOL_RESULT_CHARS:
+            message = {**message, "content": content[:OLD_TOOL_RESULT_CHARS] + " ... [older result shortened]"}
+        out.append(message)
+    return out
+
+
 def _finish(turn: Turn, call_id: str, name: str, args: dict, text: str, *, ok: bool,
             tier: str | None, mode: str, started: float | None = None) -> dict:
     text = redact(text)
@@ -155,15 +170,23 @@ async def _handle_call(turn: Turn, call: dict, known: set[str]) -> AsyncIterator
         if turn.bypass:
             mode = "bypassed"
         else:
-            row = turn.store.get_pending(call_id)
+            row = turn.store.get_pending(turn.chat_id, call_id)
+            # An approval covers one specific call. A reused id, or the same id
+            # with different arguments, is a new request and must be asked again.
+            if row is not None and (
+                row["status"] == "used" or row["tool"] != name or row["arguments"] != args
+            ):
+                turn.store.delete_pending(turn.chat_id, call_id)
+                row = None
             if row is None:
                 turn.store.create_pending(call_id, turn.chat_id, name, args, tiers.describe(name, args))
-                row = turn.store.get_pending(call_id)
+                row = turn.store.get_pending(turn.chat_id, call_id)
             if row["status"] == "pending":
                 yield {"type": "pending_action", "call_id": call_id, "tool": name,
                        "arguments": args, "description": row["description"]}
                 return
             if row["status"] == "denied":
+                turn.store.set_pending_status(turn.chat_id, call_id, "used")
                 yield _finish(turn, call_id, name, args,
                               "The user declined this action. Do not retry it unless they ask.",
                               ok=False, tier=tier, mode="denied")
@@ -176,6 +199,9 @@ async def _handle_call(turn: Turn, call: dict, known: set[str]) -> AsyncIterator
         result = await turn.backend.call(name, args)
     except Exception as exc:  # a tool-server fault must not end the conversation
         result = BackendResult(f"Tool failed: {exc}", [], True)
+
+    if mode == "approved":
+        turn.store.set_pending_status(turn.chat_id, call_id, "used")
 
     cards = [split_card(card, turn.downloads, turn.owner_key) for card in result.ui]
     yield _finish(turn, call_id, name, args, result.text, ok=not result.is_error,
@@ -219,7 +245,7 @@ async def run_turn(turn: Turn) -> AsyncIterator[dict]:
         steps += 1
 
         try:
-            reply = await turn.chat([{"role": "system", "content": SYSTEM_PROMPT}] + history + nudge, tools)
+            reply = await turn.chat([{"role": "system", "content": SYSTEM_PROMPT}] + for_model(history) + nudge, tools)
         except GroqError as exc:
             if exc.code == "tool_use_failed" and not nudge:
                 nudge = [{"role": "user", "content": NUDGE}]

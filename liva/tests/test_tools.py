@@ -207,3 +207,35 @@ def test_sentinel_error_carries_the_servers_message():
     })
     with pytest.raises(SentinelError, match="database is down"):
         run(tools.get_config(client))
+
+
+# ---- regressions from review ------------------------------------------------ #
+
+
+def test_destructive_tools_refuse_a_loose_name_match():
+    client, calls = make_client({("GET", "/devices"): (200, [{**DEVICE, "name": "web-prod-01"}])})
+    with pytest.raises(tools.ToolError, match="exact"):
+        run(tools.delete_device(client, "web"))
+    with pytest.raises(tools.ToolError, match="web-prod-01"):
+        run(tools.rotate_device_key(client, "web"))
+    assert all(c[0] == "GET" for c in calls)
+
+
+def test_destructive_tools_accept_an_exact_name():
+    client, _ = make_client({
+        ("GET", "/devices"): (200, [DEVICE]),
+        ("GET", f"/devices/{DEVICE_ID}"): (200, DEVICE),
+        ("DELETE", f"/devices/{DEVICE_ID}"): (204, b""),
+    })
+    assert "web-01" in run(tools.delete_device(client, "WEB-01")).text
+
+
+def test_the_key_survives_an_unexpected_failure_building_extras():
+    client, _ = make_client({
+        ("POST", "/devices"): (201, {"device_id": DEVICE_ID, "name": "web-01", "api_key": KEY}),
+        ("GET", "/watchdog-release"): (200, {"unexpected": "shape"}),   # no package_filename
+        ("POST", "/installer"): (200, b"#!/bin/sh\n"),
+    })
+    out = run(tools.create_device(client, "web-01"))
+    assert out.ui["api_key"] == KEY
+    assert out.ui["warnings"]

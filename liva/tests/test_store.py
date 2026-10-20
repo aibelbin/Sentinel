@@ -31,10 +31,10 @@ def test_pending_lifecycle():
     store = Store(":memory:")
     chat = store.create_chat("admin")
     store.create_pending("call_1", chat["id"], "delete_device", {"device": "web-01"}, "Delete web-01")
-    assert store.get_pending("call_1")["status"] == "pending"
+    assert store.get_pending(chat["id"], "call_1")["status"] == "pending"
     assert store.list_pending(chat["id"])[0]["arguments"] == {"device": "web-01"}
-    store.set_pending_status("call_1", "approved")
-    assert store.get_pending("call_1")["status"] == "approved"
+    store.set_pending_status(chat["id"], "call_1", "approved")
+    assert store.get_pending(chat["id"], "call_1")["status"] == "approved"
     assert store.list_pending(chat["id"]) == []
 
 

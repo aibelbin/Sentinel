@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import sys
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -13,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .agent import McpBackend, Turn, run_turn
+from .agent import McpBackend, Turn, run_turn, unresolved_calls
 from .config import get_settings
 from .downloads import Downloads
 from .groq import chat_completion
@@ -40,8 +41,19 @@ class Session:
     owner_key: str
 
 
+_VERIFIED: dict[str, float] = {}
+_VERIFY_TTL = 10.0
+
+
 async def _verify_with_sentinel(token: str) -> None:
-    """The session must still be valid on Sentinel; a revoked token cuts Liva off."""
+    """The session must still be valid on Sentinel; a revoked token cuts Liva off.
+
+    Cached for a few seconds so a page of widgets is not a page of round-trips.
+    """
+    key = hashlib.sha256(token.encode()).hexdigest()
+    now = time.monotonic()
+    if _VERIFIED.get(key, 0) > now:
+        return
     client = Sentinel(token, get_settings().sentinel_url)
     try:
         await client.get("/config")
@@ -49,6 +61,10 @@ async def _verify_with_sentinel(token: str) -> None:
         if exc.status == 401:
             raise HTTPException(401, "Your Sentinel session has expired.") from exc
         raise HTTPException(502, f"Cannot verify the session: {exc.message}") from exc
+    else:
+        _VERIFIED[key] = now + _VERIFY_TTL
+        for stale in [k for k, expiry in _VERIFIED.items() if expiry <= now]:
+            del _VERIFIED[stale]
     finally:
         await client.aclose()
 
@@ -187,6 +203,15 @@ def create_app(
         chat = owned_chat(db, chat_id, who)
         if db.list_pending(chat_id):
             raise HTTPException(409, "Approve or deny the pending action first.")
+        # A turn cut off mid-call (closed tab, restart) leaves a call with no
+        # result. Settle it before the new message, or it would run again and
+        # the transcript would be out of order for the model.
+        for dangling in unresolved_calls(db.model_messages(chat_id)):
+            db.add_message(chat_id, {
+                "role": "tool", "tool_call_id": dangling["id"],
+                "content": "This call was interrupted before it finished, so its outcome is unknown. "
+                           "Check the current state before retrying it.",
+            })
         if chat["title"] == "New chat":
             db.set_title(chat_id, body.content.strip()[:40])
         db.add_message(chat_id, {"role": "user", "content": body.content})
@@ -198,10 +223,10 @@ def create_app(
         who: Session = Depends(session), db: Store = Depends(db_dep),
     ) -> StreamingResponse:
         owned_chat(db, chat_id, who)
-        row = db.get_pending(call_id)
-        if row is None or row["chat_id"] != chat_id or row["status"] != "pending":
+        row = db.get_pending(chat_id, call_id)
+        if row is None or row["status"] != "pending":
             raise HTTPException(404, "No such pending action.")
-        db.set_pending_status(call_id, "approved" if body.approve else "denied")
+        db.set_pending_status(chat_id, call_id, "approved" if body.approve else "denied")
         return stream(request, db, who, chat_id, body.bypass)
 
     @app.get("/downloads/{download_id}")

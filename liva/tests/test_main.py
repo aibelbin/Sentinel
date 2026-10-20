@@ -172,3 +172,17 @@ def test_audit_endpoint_lists_tool_calls():
     client.post(f"/chats/{chat['id']}/messages", headers=H, json={"content": "x", "bypass": False})
     rows = client.get("/audit", headers=H).json()
     assert rows[0]["tool"] == "list_devices" and rows[0]["mode"] == "auto"
+
+
+def test_a_call_interrupted_mid_turn_does_not_wedge_or_rerun(monkeypatch):
+    client = make_client([{"role": "assistant", "content": "back again"}])
+    chat = client.post("/chats", headers=H).json()
+    store = client.app.state.store
+    store.add_message(chat["id"], {"role": "user", "content": "list"})
+    store.add_message(chat["id"], {"role": "assistant", "content": None,
+                                   "tool_calls": [call("c1", "list_devices")]})   # stream died here
+    evs = events(client.post(f"/chats/{chat['id']}/messages", headers=H, json={"content": "hello?", "bypass": False}))
+    assert [e["type"] for e in evs] == ["message", "done"]
+    assert FakeBackend.calls == []            # the dangling call was settled, not re-executed
+    roles = [m["role"] for m in store.model_messages(chat["id"])]
+    assert roles == ["user", "assistant", "tool", "user", "assistant"]

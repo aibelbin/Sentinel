@@ -39,7 +39,7 @@ test-dashboard: ## Run dashboard tests
 	$(COMPOSE) exec -T dashboard sh -lc 'pip install -q pytest && cd /app && python -m pytest tests -q'
 
 test-liva: ## Run Liva tests
-	$(COMPOSE) exec -T liva sh -lc 'pip install -q -r requirements-dev.txt && python -m pytest tests -q'
+	$(COMPOSE) exec -T -u root liva sh -lc 'pip install -q -r requirements-dev.txt && python -m pytest tests -q'
 
 sim-enroll: ## Create devices for the sim containers and install the watchdog in them
 	python3 scripts/enroll_sim.py

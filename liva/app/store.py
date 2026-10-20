@@ -23,9 +23,10 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);
 CREATE TABLE IF NOT EXISTS pending (
-    call_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    call_id TEXT NOT NULL, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     tool TEXT NOT NULL, arguments TEXT NOT NULL, description TEXT NOT NULL,
-    status TEXT NOT NULL, created_at REAL NOT NULL
+    status TEXT NOT NULL, created_at REAL NOT NULL,
+    PRIMARY KEY (chat_id, call_id)
 );
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, owner TEXT NOT NULL, chat_id TEXT,
@@ -107,12 +108,17 @@ class Store:
         data["arguments"] = json.loads(data["arguments"])
         return data
 
-    def get_pending(self, call_id: str) -> dict | None:
-        rows = self._all("SELECT * FROM pending WHERE call_id = ?", (call_id,))
+    def get_pending(self, chat_id: str, call_id: str) -> dict | None:
+        rows = self._all("SELECT * FROM pending WHERE chat_id = ? AND call_id = ?", (chat_id, call_id))
         return self._pending(rows[0]) if rows else None
 
-    def set_pending_status(self, call_id: str, status: str) -> None:
-        self._run("UPDATE pending SET status = ? WHERE call_id = ?", (status, call_id))
+    def set_pending_status(self, chat_id: str, call_id: str, status: str) -> None:
+        self._run(
+            "UPDATE pending SET status = ? WHERE chat_id = ? AND call_id = ?", (status, chat_id, call_id)
+        )
+
+    def delete_pending(self, chat_id: str, call_id: str) -> None:
+        self._run("DELETE FROM pending WHERE chat_id = ? AND call_id = ?", (chat_id, call_id))
 
     def list_pending(self, chat_id: str) -> list[dict]:
         rows = self._all(

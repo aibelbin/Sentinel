@@ -42,8 +42,12 @@ def clip(value: Any) -> str:
     )
 
 
-async def resolve_device(c: Sentinel, ref: str) -> str:
-    """Accepts a UUID, or a device name the administrator would actually say."""
+async def resolve_device(c: Sentinel, ref: str, *, exact_only: bool = False) -> str:
+    """Accepts a UUID, or a device name the administrator would actually say.
+
+    exact_only is for destructive tools: a loose substring must never decide
+    which device is deleted, so only a UUID or the exact name will do.
+    """
     try:
         return str(uuid.UUID(ref))
     except ValueError:
@@ -52,6 +56,9 @@ async def resolve_device(c: Sentinel, ref: str) -> str:
     exact = [d for d in matches if d["name"].lower() == ref.lower()]
     if len(exact) == 1:
         return exact[0]["id"]
+    if exact_only:
+        hint = f"; did you mean: {', '.join(sorted(d['name'] for d in matches))}" if matches else ""
+        raise ToolError(f"{ref!r} is not an exact device name or id{hint}")
     if len(matches) == 1:
         return matches[0]["id"]
     if not matches:
@@ -147,16 +154,16 @@ async def _credentials_card(c: Sentinel, device_name: str, key: str, *, with_pac
         try:
             package_name, data = await _package(c)
             files.append(_file(package_name, "application/vnd.debian.binary-package", data))
-        except SentinelError as exc:
+        except Exception as exc:  # anything at all: the key must still be shown
             package_name = None
-            warnings.append(f"Could not build the .deb: {exc.message}")
+            warnings.append(f"Could not build the .deb: {getattr(exc, 'message', exc)}")
     try:
         script = await c.post_text(
             "/installer", {"server_url": server, "api_key": key, "insecure": insecure}
         )
         files.append(_file("sentinel-install.sh", "text/x-shellscript", script.encode()))
-    except SentinelError as exc:
-        warnings.append(f"Could not build the installer script: {exc.message}")
+    except Exception as exc:
+        warnings.append(f"Could not build the installer script: {getattr(exc, 'message', exc)}")
 
     enroll = f"sudo sentinel-watchdog enroll --server {server} --key {key}" + (
         " --insecure" if insecure else ""
@@ -181,7 +188,7 @@ async def create_device(c: Sentinel, name: str) -> ToolOutput:
 
 
 async def rotate_device_key(c: Sentinel, device: str) -> ToolOutput:
-    device_id = await resolve_device(c, device)
+    device_id = await resolve_device(c, device, exact_only=True)
     detail = await c.get(f"/devices/{device_id}")
     issued = await c.post(f"/devices/{device_id}/rotate-key")
     card = await _credentials_card(c, detail["name"], issued["api_key"], with_package=False)
@@ -221,7 +228,7 @@ async def queue_collect_inventory(c: Sentinel, device: str) -> ToolOutput:
 
 
 async def delete_device(c: Sentinel, device: str) -> ToolOutput:
-    device_id = await resolve_device(c, device)
+    device_id = await resolve_device(c, device, exact_only=True)
     detail = await c.get(f"/devices/{device_id}")
     await c.delete(f"/devices/{device_id}")
     return ToolOutput(f"Device '{detail['name']}' ({device_id}) deleted.")

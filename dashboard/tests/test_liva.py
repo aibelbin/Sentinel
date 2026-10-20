@@ -126,3 +126,22 @@ def test_the_liva_page_is_registered():
     source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
     assert '"liva": ("Liva", views_liva.render)' in source
     assert "import views_liva" in source
+
+
+def test_a_stream_that_dies_midway_is_liva_unavailable_not_a_traceback(monkeypatch):
+    class Dying(FakeResponse):
+        def iter_lines(self, decode_unicode=True):
+            yield json.dumps({"type": "message", "content": "partial"})
+            raise requests.exceptions.ChunkedEncodingError("cut")
+
+    patch_request(monkeypatch, Dying())
+    stream = Liva("t", "a").send("c1", "hi", False)
+    assert next(stream)["type"] == "message"
+    with pytest.raises(LivaUnavailable):
+        next(stream)
+
+
+def test_a_garbled_stream_line_is_liva_unavailable(monkeypatch):
+    patch_request(monkeypatch, FakeResponse(lines=["{not json"]))
+    with pytest.raises(LivaUnavailable):
+        list(Liva("t", "a").send("c1", "hi", False))

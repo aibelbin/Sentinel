@@ -96,7 +96,7 @@ def test_approval_tool_pauses_without_executing():
     assert types(events) == ["pending_action", "done"]
     assert events[0]["call_id"] == "c1" and "web-01" in events[0]["description"]
     assert backend.calls == []
-    assert store.get_pending("c1")["status"] == "pending"
+    assert store.get_pending(turn.chat_id, "c1")["status"] == "pending"
 
 
 def test_approve_resumes_and_executes():
@@ -104,7 +104,7 @@ def test_approve_resumes_and_executes():
     store, turn = setup([assistant(None, [tool_call("c1", "delete_device", {"device": "web-01"})]),
                          assistant("Deleted.")], backend)
     drain(turn)
-    store.set_pending_status("c1", "approved")
+    store.set_pending_status(turn.chat_id, "c1", "approved")
     events = drain(turn)
     assert backend.calls == [("delete_device", {"device": "web-01"})]
     assert events[0]["mode"] == "approved"
@@ -116,7 +116,7 @@ def test_deny_tells_the_model_and_does_not_execute():
     store, turn = setup([assistant(None, [tool_call("c1", "delete_device", {"device": "web-01"})]),
                          assistant("Okay, leaving it.")], backend)
     drain(turn)
-    store.set_pending_status("c1", "denied")
+    store.set_pending_status(turn.chat_id, "c1", "denied")
     events = drain(turn)
     assert backend.calls == []
     result = [e for e in events if e["type"] == "tool_result"][0]
@@ -202,3 +202,56 @@ def test_unresolved_calls_only_looks_at_the_last_assistant_message():
     assert [c["id"] for c in unresolved_calls(history)] == ["b"]
     assert unresolved_calls([{"role": "assistant", "content": "hi"}]) == []
     assert unresolved_calls([]) == []
+
+
+# ---- regressions from review ------------------------------------------------ #
+
+
+def test_an_approval_is_single_use_and_bound_to_its_arguments():
+    backend = FakeBackend()
+    store, turn = setup([assistant(None, [tool_call("c1", "delete_device", {"device": "web-01"})]),
+                         assistant("Deleted.")], backend)
+    drain(turn)
+    store.set_pending_status(turn.chat_id, "c1", "approved")
+    drain(turn)
+    assert backend.calls == [("delete_device", {"device": "web-01"})]
+
+    # The model reuses the same call id for a different, later request.
+    store.add_message(turn.chat_id, {"role": "user", "content": "now delete db-01"})
+    turn.chat = scripted([assistant(None, [tool_call("c1", "delete_device", {"device": "db-01"})])])
+    events = drain(turn)
+    assert types(events) == ["pending_action", "done"]
+    assert backend.calls == [("delete_device", {"device": "web-01"})]
+
+
+def test_approvals_do_not_leak_between_chats():
+    backend = FakeBackend()
+    store, turn_a = setup([assistant(None, [tool_call("c1", "delete_device", {"device": "w"})])], backend)
+    drain(turn_a)
+    store.set_pending_status(turn_a.chat_id, "c1", "approved")
+
+    other = store.create_chat("admin")
+    store.add_message(other["id"], {"role": "user", "content": "delete w"})
+    turn_b = Turn(store=store, chat_id=other["id"], owner="admin", owner_key="ok", backend=backend,
+                  chat=scripted([assistant(None, [tool_call("c1", "delete_device", {"device": "w"})])]),
+                  downloads=Downloads(), bypass=False, max_steps=8)
+    assert types(drain(turn_b)) == ["pending_action", "done"]
+    assert backend.calls == []
+
+
+def test_old_tool_results_are_shortened_for_the_model_but_not_in_storage():
+    from app.agent import OLD_TOOL_RESULT_CHARS, for_model
+
+    big = "x" * 5000
+    history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": None, "tool_calls": [tool_call("a", "list_devices")]},
+        {"role": "tool", "tool_call_id": "a", "content": big},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": None, "tool_calls": [tool_call("b", "list_devices")]},
+        {"role": "tool", "tool_call_id": "b", "content": big},
+    ]
+    shaped = for_model(history)
+    assert len(shaped[2]["content"]) < OLD_TOOL_RESULT_CHARS + 50
+    assert shaped[5]["content"] == big          # the current question keeps full results
+    assert history[2]["content"] == big         # input is not mutated

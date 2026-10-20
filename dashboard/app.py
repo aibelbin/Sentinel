@@ -26,7 +26,7 @@ def _clear_session() -> None:
     for key in (
         "token", "username", "page", "device_id", "new_device", "rotated_key",
         "pkg_page", "pkg_view_key", "pending_delete",
-        "liva_chat_id", "liva_bypass", "liva_decision",
+        "liva_chat_id", "liva_bypass", "liva_decision", "liva_live_cards",
     ):
         st.session_state.pop(key, None)
 

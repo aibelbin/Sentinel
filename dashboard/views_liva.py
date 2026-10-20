@@ -15,6 +15,36 @@ def _client() -> Liva:
     return Liva(st.session_state["token"], st.session_state.get("username", "admin"))
 
 
+LIVE_CARDS = "liva_live_cards"
+
+
+def _keep_live(liva: Liva, card: dict) -> dict:
+    """Fetches a card's one-time downloads now and remembers the card.
+
+    The key and the files are shown once and cannot be fetched again, so they
+    are held in this session until dismissed. Otherwise any rerun (an approval
+    prompt, a widget click) would erase the only copy before it was copied.
+    """
+    card = {**card, "files": [dict(f) for f in card.get("files", [])]}
+    for file in card["files"]:
+        download_id = file.pop("download_id", None)
+        if download_id:
+            try:
+                file["data"] = liva.download(download_id)
+            except (LivaError, LivaUnavailable):
+                pass
+    st.session_state.setdefault(LIVE_CARDS, []).append(card)
+    return card
+
+
+def _render_live_cards(liva: Liva) -> None:
+    for index, card in enumerate(list(st.session_state.get(LIVE_CARDS, []))):
+        _render_card(liva, card, f"keep_{index}")
+        if st.button("Dismiss (the key is gone once you do)", key=f"keep_dismiss_{index}"):
+            st.session_state[LIVE_CARDS].pop(index)
+            st.rerun()
+
+
 def _render_card(liva: Liva, card: dict, key: str) -> None:
     with st.container(border=True):
         if card.get("kind") == "credentials":
@@ -32,6 +62,10 @@ def _render_card(liva: Liva, card: dict, key: str) -> None:
             st.markdown("**Download**")
 
         for index, file in enumerate(card.get("files", [])):
+            if file.get("data") is not None:
+                st.download_button(f"⬇️  {file['name']}", data=file["data"], file_name=file["name"],
+                                   key=f"{key}_dl_{index}")
+                continue
             download_id = file.get("download_id")
             if not download_id:
                 # Downloads are single-use and held in memory, so a reloaded
@@ -58,7 +92,7 @@ def _render_event(liva: Liva, event: dict, state: dict) -> None:
         st.caption(f"⚠️ {event['name']}: {event['summary']}")
     elif kind == "card":
         state["cards"] = state.get("cards", 0) + 1
-        _render_card(liva, event["card"], f"live_{state['cards']}")
+        _render_card(liva, _keep_live(liva, event["card"]), f"live_{state['cards']}")
     elif kind == "pending_action":
         state["paused"] = True
     elif kind == "error":
@@ -131,6 +165,7 @@ def _render_chat(liva: Liva) -> None:
         )
     if picked != current:
         st.session_state["liva_chat_id"] = picked
+        st.session_state.pop(LIVE_CARDS, None)
         st.rerun()
     with top[1]:
         bypass = st.toggle(
@@ -148,6 +183,7 @@ def _render_chat(liva: Liva) -> None:
 
     detail = liva.chat(current) if current else {"messages": [], "pending": []}
     _render_history(liva, detail["messages"])
+    _render_live_cards(liva)
     pending = detail["pending"]
 
     # A click is recorded and handled on the next run, so the approval panel is

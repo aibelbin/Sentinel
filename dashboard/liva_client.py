@@ -77,9 +77,14 @@ class Liva:
         return self._request("GET", f"/downloads/{download_id}").content
 
     def _events(self, response) -> Iterator[dict]:
-        for line in response.iter_lines(decode_unicode=True):
-            if line:
-                yield json.loads(line)
+        # The stream can die after the request succeeded (Liva restarts, a read
+        # times out, a line is cut short); none of that may escape as a traceback.
+        try:
+            for line in response.iter_lines(decode_unicode=True):
+                if line:
+                    yield json.loads(line)
+        except (requests.RequestException, ValueError) as exc:
+            raise LivaUnavailable(f"the connection to Liva broke mid-answer: {exc}") from exc
 
     def send(self, chat_id: str, text: str, bypass: bool) -> Iterator[dict]:
         response = self._request(
