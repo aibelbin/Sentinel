@@ -1,0 +1,6 @@
+# No Postgres driver on purpose: Liva reaches Sentinel's data only via the API.
+fastapi==0.156.1
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+# 1.x on purpose: 2.x renamed FastMCP and changed the client/server APIs.
+mcp==1.30.0
